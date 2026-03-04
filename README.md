@@ -66,6 +66,12 @@ Both `nb g` (short alias) and `nb nb_grep` (full name) work.
 
 ---
 
+## Related
+
+**[tw2nb](https://github.com/linuxcaffe/tw2nb)** — archives Taskwarrior task events (completed, deleted, annotated) to nb as structured todo notes and a running daily journal. Includes `nb info`, a companion plugin that shows Taskwarrior task details for any uuid referenced in an nb note.
+
+---
+
 ## Contributing
 
 New plugins welcome. Each plugin should:
