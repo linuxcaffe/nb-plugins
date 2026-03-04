@@ -47,7 +47,7 @@ nb g <pattern>                  # search all notebooks (default: 1 line context)
 nb g <pattern> tasks:           # scope to one notebook
 nb g -C 3 <pattern>             # 3 lines of context around each match
 nb g -A 2 -B 0 <pattern>        # 2 lines after, none before
-nb g -i <pattern>               # case-insensitive
+nb g -I <pattern>               # case-insensitive
 nb g -l <pattern>               # list matching note titles only
 NB_GREP_CONTEXT=3 nb g <pattern> # set default context via env var
 ```
@@ -61,7 +61,7 @@ Both `nb g` (short alias) and `nb nb_grep` (full name) work.
 | `-C <n>` | Lines of context around each match (default: 1) |
 | `-A <n>` | Lines after each match |
 | `-B <n>` | Lines before each match |
-| `-i` | Case-insensitive search |
+| `-I` | Case-insensitive search (`-i` is reserved by nb) |
 | `-l` | List matching note titles only |
 
 ---
