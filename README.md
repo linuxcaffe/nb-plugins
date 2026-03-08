@@ -8,7 +8,59 @@ A collection of community plugins for [nb](https://xwmx.github.io/nb/) — the c
 
 | Plugin | Command | Description |
 |--------|---------|-------------|
+| [cal.nb-plugin](#calnb-plugin) | `nb cal` | Date-aware calendar view and range search for date-stamped notes |
 | [grep.nb-plugin](#grepnb-plugin) | `nb g` | Context-aware search — see surrounding lines, not just the match |
+
+---
+
+## cal.nb-plugin
+
+> For nb users who keep date-stamped notes (daily journals, logs, diaries) — a calendar view plus date-range list and search.
+
+### What this does
+
+`nb cal` renders a monthly calendar in the terminal. Days that have notes are highlighted in cyan; today is bold yellow. From there you can list or grep all notes within any date range, with an interactive date picker when you need it.
+
+### Install
+
+```bash
+nb plugin install https://raw.githubusercontent.com/linuxcaffe/nb-plugins/main/cal.nb-plugin
+```
+
+### Usage
+
+```bash
+nb cal                                          # current month calendar
+nb cal jan                                      # month by name (current year)
+nb cal 2026-01                                  # specific month
+
+nb cal --start 2026-01-01                       # list notes from date to today
+nb cal --end   2026-03-01                       # list notes from month start to date
+nb cal --start 2026-01-01 --end 2026-03-01      # list notes in range
+nb cal --start 2026-01-01 --end 2026-03-01 g <term>  # grep in range
+
+nb cal --start                                  # interactive date picker → sets start
+nb cal --end                                    # interactive date picker → sets end
+nb cal --start --end                            # pick both dates interactively
+
+nb cal --start mar4 g gbct home:               # natural date, grep term, scoped notebook
+```
+
+### Date picker keys
+
+| Key | Action |
+|-----|--------|
+| `←` / `→` | Previous / next day |
+| `↑` / `↓` | Previous / next week |
+| `<` / `>` | Previous / next month |
+| Enter / Space | Select date |
+| `q` / Esc | Cancel |
+
+### Notes
+
+- Notes are matched by filename prefix: files named `YYYYMMDD*.md` (or `.txt`, `.org`) are treated as date-stamped.
+- The `--start` / `--end` date arguments accept any format that GNU `date -d` understands: `2026-03-01`, `mar1`, `last monday`, `20260301`, etc.
+- Scoping to a notebook: append `notebook:` as the last argument.
 
 ---
 
