@@ -18,13 +18,13 @@
 
 # ── ANSI colours ─────────────────────────────────────────────────────────────
 
-_CAL_RESET='\033[0m'
-_CAL_HAS_NOTES='\033[36m'    # cyan        — day has notes
-_CAL_TODAY='\033[1;33m'      # bold yellow — today
-_CAL_EMPTY='\033[2m'         # dim         — no notes
-_CAL_HEADER='\033[1m'        # bold        — month/weekday headers
-_CAL_MATCH='\033[1;32m'      # bold green  — grep match highlight
-_CAL_CURSOR='\033[7m'        # reverse     — date picker cursor
+_CAL_RESET=$'\033[0m'
+_CAL_HAS_NOTES=$'\033[36m'    # cyan        — day has notes
+_CAL_TODAY=$'\033[1;33m'      # bold yellow — today
+_CAL_EMPTY=$'\033[2m'         # dim         — no notes
+_CAL_HEADER=$'\033[1m'        # bold        — month/weekday headers
+_CAL_MATCH=$'\033[1;32m'      # bold green  — grep match highlight
+_CAL_CURSOR=$'\033[7m'        # reverse     — date picker cursor
 
 # ── Notebook directory resolution ─────────────────────────────────────────────
 
@@ -201,7 +201,210 @@ _cal_datepicker() {
   [[ -n "$result" ]]  # exit 0 if selected, 1 if cancelled
 }
 
-# ── Calendar renderer ─────────────────────────────────────────────────────────
+# ── nb ID lookup ──────────────────────────────────────────────────────────────
+# Each notebook has an .index file — filenames one per line, line# = nb ID.
+
+_cal_nb_id() {
+  local fpath="$1" nb_dir="$2"
+  local filename="${fpath##*/}"
+  local index="${nb_dir}/.index"
+  [[ -f "$index" ]] || { printf '?'; return; }
+  local id=0 line
+  while IFS= read -r line; do
+    id=$(( id + 1 ))
+    [[ "$line" == "$filename" ]] && { printf '%d' "$id"; return; }
+  done < "$index"
+  printf '?'
+}
+
+# ── Interactive calendar browser ──────────────────────────────────────────────
+# _CAL_BROWSE_LINES: set by _cal_browse_draw, read by _cal_browse event loop.
+
+_CAL_BROWSE_LINES=0
+
+# Args: cy cm cd today nb_dir
+# Draws the combined two-panel display to /dev/tty.
+# Left panel (cols 1-20): calendar with cursor on selected day.
+# Right panel (col 26+): date label + note titles for selected day.
+# Each combined row: left_content + \033[26G (col-abs) + right_content.
+
+_cal_browse_draw() {
+  local cy="$1" cm="$2" cd="$3" today="$4" nb_dir="$5"
+
+  # ── Calendar data ──────────────────────────────────────────────────────────
+  local month_name dim fdow
+  month_name="$(date -d "${cy}-${cm}-01" +%B 2>/dev/null)"
+  dim="$(        date -d "${cy}-${cm}-01 +1 month -1 day" +%d 2>/dev/null)"
+  fdow="$(        date -d "${cy}-${cm}-01" +%u 2>/dev/null)"
+
+  # Which days in this month have notes (for calendar colouring)
+  local notes_days=""
+  local _tm; _tm="$(mktemp)"
+  find "$nb_dir" -maxdepth 1 \
+    \( -name "${cy}${cm}*.md" -o -name "${cy}${cm}*.txt" -o -name "${cy}${cm}*.org" \) \
+    2>/dev/null > "$_tm"
+  while IFS= read -r _f; do
+    [[ -z "$_f" ]] && continue
+    local _b="${_f##*/}"; notes_days+=":${_b:6:2}:"
+  done < "$_tm"
+  rm -f "$_tm"
+
+  # ── Right panel: notes for selected day ───────────────────────────────────
+  local sel="${cy}${cm}${cd}"
+  local rp=()   # right-panel lines
+  local date_label
+  date_label="$(date -d "${cy}-${cm}-${cd}" +'%A %-d %B %Y' 2>/dev/null)"
+  rp+=("${_CAL_TODAY}${date_label}${_CAL_RESET}")
+
+  local _td; _td="$(mktemp)"
+  find "$nb_dir" -maxdepth 1 \
+    \( -name "${sel}*.md" -o -name "${sel}*.txt" -o -name "${sel}*.org" \) \
+    2>/dev/null | sort > "$_td"
+  local _notebook="${nb_dir##*/}"
+  local ncount=0
+  while IFS= read -r _nf; do
+    [[ -z "$_nf" ]] && continue
+    local _t; _t="$(head -1 "$_nf" 2>/dev/null | sed 's/^#* *//')"
+    [[ -z "$_t" ]] && _t="${_nf##*/}"
+    local _id; _id="$(_cal_nb_id "$_nf" "$nb_dir")"
+    rp+=("${_CAL_HAS_NOTES}[${_notebook}:${_id}] ${_t}${_CAL_RESET}")
+    ncount=$(( ncount + 1 ))
+  done < "$_td"
+  rm -f "$_td"
+  [[ $ncount -eq 0 ]] && rp+=("${_CAL_EMPTY}(no notes)${_CAL_RESET}")
+
+  # ── Build calendar day-rows as strings (for left panel) ───────────────────
+  local rows=()
+  local col=$(( fdow - 1 ))
+  local cur_row=""
+  local i; for (( i=0; i<col; i++ )); do cur_row+="   "; done  # leading padding
+  local day first_in_row=1
+  for (( day=1; day<=dim; day++ )); do
+    local d2; printf -v d2 '%02d' "$day"
+    local ds="${cy}${cm}${d2}"
+    local color="$_CAL_EMPTY"
+    [[ "$notes_days" == *":${d2}:"* ]] && color="$_CAL_HAS_NOTES"
+    [[ "$ds" == "$today"            ]] && color="$_CAL_TODAY"
+    local cell
+    if [[ "$d2" == "$cd" ]]; then
+      printf -v cell "${_CAL_CURSOR}${color}%2d${_CAL_RESET}" "$day"
+    else
+      printf -v cell "${color}%2d${_CAL_RESET}" "$day"
+    fi
+    [[ $first_in_row -eq 0 ]] && cur_row+=" "
+    cur_row+="$cell"
+    first_in_row=0
+    col=$(( (col + 1) % 7 ))
+    if [[ "$col" -eq 0 ]]; then
+      rows+=("$cur_row"); cur_row=""; first_in_row=1
+    fi
+  done
+  [[ -n "$cur_row" ]] && rows+=("$cur_row")
+
+  # ── Output ────────────────────────────────────────────────────────────────
+  # _combo: left content + jump to col 26 + right panel entry
+  # _plain: full-width line (hint row — spans past col 26, no right panel)
+  local total_lines=0 rpi=0
+  _combo() {
+    printf '%s\033[26G%s\r\n' "$1" "${rp[$rpi]:-}" >/dev/tty
+    rpi=$(( rpi + 1 )); total_lines=$(( total_lines + 1 ))
+  }
+  _plain() {
+    printf '%s\r\n' "$1" >/dev/tty; total_lines=$(( total_lines + 1 ))
+  }
+
+  _combo "$(printf '\033[1m  %-18s\033[0m' "${month_name} ${cy}")"
+  _combo $'\033[1mMo Tu We Th Fr Sa Su\033[0m'
+  local r; for r in "${rows[@]}"; do _combo "$r"; done
+  _plain ""
+  _plain $'\033[2;3m\xe2\x86\x90\xe2\x86\x92 day  \xe2\x86\x91\xe2\x86\x93 week  <> month  Enter select  q quit\033[0m'
+
+  unset -f _combo _plain
+  _CAL_BROWSE_LINES=$total_lines
+}
+
+# Interactive calendar browser — called directly (not in $() subshell).
+# Replaces the static _cal_show_month for the 'calendar' mode.
+
+_cal_browse() {
+  local nb_dir="$1"
+  local cy="${2:-$(date +%Y)}"
+  local cm="${3:-$(date +%m)}"
+  local cd
+  # Start cursor on today if viewing current month, else day 1
+  if [[ "${cy}${cm}" == "$(date +%Y%m)" ]]; then
+    cd="$(date +%d)"
+  else
+    cd="01"
+  fi
+  local today; today="$(date +%Y%m%d)"
+
+  local old_stty; old_stty="$(stty -g 2>/dev/null)"
+  stty raw -echo 2>/dev/null
+  printf '\033[?25l' >/dev/tty
+  trap 'stty "$old_stty" 2>/dev/null; printf "\033[?25h\n" >/dev/tty' EXIT INT TERM
+
+  _cal_browse_draw "$cy" "$cm" "$cd" "$today" "$nb_dir"
+
+  local done=0 result=""
+  while [[ $done -eq 0 ]]; do
+    local key; IFS= read -rsn1 key </dev/tty 2>/dev/null
+    if [[ "$key" == $'\033' ]]; then
+      local k2; IFS= read -rsn2 -t 0.1 k2 </dev/tty 2>/dev/null || true
+      key="${key}${k2}"
+    fi
+
+    case "$key" in
+      $'\033[C'|l)
+        local p; p="$(date -d "${cy}-${cm}-${cd} +1 day"  '+%Y %m %d' 2>/dev/null)"
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+      $'\033[D'|h)
+        local p; p="$(date -d "${cy}-${cm}-${cd} -1 day"  '+%Y %m %d' 2>/dev/null)"
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+      $'\033[B'|j)
+        local p; p="$(date -d "${cy}-${cm}-${cd} +7 days" '+%Y %m %d' 2>/dev/null)"
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+      $'\033[A'|k)
+        local p; p="$(date -d "${cy}-${cm}-${cd} -7 days" '+%Y %m %d' 2>/dev/null)"
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+      '>'|']'|$'\033[6~')
+        local p; p="$(date -d "${cy}-${cm}-01 +1 month" '+%Y %m' 2>/dev/null)"
+        if [[ -n "$p" ]]; then
+          IFS=' ' read -r cy cm <<< "$p"
+          local dim; dim="$(date -d "${cy}-${cm}-01 +1 month -1 day" +%d)"
+          [[ "${cd#0}" -gt "${dim#0}" ]] && cd="$dim"
+        fi ;;
+      '<'|'['|$'\033[5~')
+        local p; p="$(date -d "${cy}-${cm}-01 -1 month" '+%Y %m' 2>/dev/null)"
+        if [[ -n "$p" ]]; then
+          IFS=' ' read -r cy cm <<< "$p"
+          local dim; dim="$(date -d "${cy}-${cm}-01 +1 month -1 day" +%d)"
+          [[ "${cd#0}" -gt "${dim#0}" ]] && cd="$dim"
+        fi ;;
+      ''|$'\r'|$'\n') # Enter — select date
+        result="${cy}${cm}${cd}"; done=1 ;;
+      q|Q|$'\033') done=1 ;;
+    esac
+
+    if [[ $done -eq 0 ]]; then
+      printf '\033[%dA\033[J' "$_CAL_BROWSE_LINES" >/dev/tty
+      _cal_browse_draw "$cy" "$cm" "$cd" "$today" "$nb_dir"
+    fi
+  done
+
+  # Clear interactive display before handing back to normal output
+  printf '\033[%dA\033[J' "$_CAL_BROWSE_LINES" >/dev/tty
+  trap - EXIT INT TERM
+  stty "$old_stty" 2>/dev/null
+  printf '\033[?25h' >/dev/tty
+
+  # If Enter was pressed (not q), list notes for the selected date
+  if [[ -n "$result" ]]; then
+    _cal_list_range "$result" "$result" "$nb_dir"
+  fi
+}
+
+# ── Calendar renderer (static — kept for reference) ───────────────────────────
 
 _cal_show_month() {
   local year="$1"
@@ -299,6 +502,7 @@ _cal_list_range() {
   local start="$1"
   local end="$2"
   local nb_dir="$3"
+  local notebook="${nb_dir##*/}"
   local tmp_files
   tmp_files="$(mktemp)"
   _cal_files_in_range "$start" "$end" "$nb_dir" > "$tmp_files"
@@ -309,12 +513,13 @@ _cal_list_range() {
     local date_str="${base:0:8}"
     local date_fmt
     date_fmt="$(date -d "${date_str:0:4}-${date_str:4:2}-${date_str:6:2}" +%Y-%m-%d 2>/dev/null || printf '%s' "$date_str")"
-    # First line of file as title fallback
+    local id; id="$(_cal_nb_id "$fpath" "$nb_dir")"
     local title
     title="$(head -1 "$fpath" 2>/dev/null | sed 's/^#* *//')"
     [[ -z "$title" ]] && title="(untitled)"
-    printf "${_CAL_HAS_NOTES}%s${_CAL_RESET}  %s\n" "$date_fmt" "$title"
-    (( count++ )) || true
+    printf "${_CAL_HAS_NOTES}[%s:%s]${_CAL_RESET}  %s  %s\n" \
+      "$notebook" "$id" "$date_fmt" "$title"
+    count=$(( count + 1 ))
   done < "$tmp_files"
   rm -f "$tmp_files"
   [[ "$count" -eq 0 ]] && printf 'No notes found in range %s – %s\n' "$start" "$end"
@@ -323,8 +528,17 @@ _cal_list_range() {
 _cal_grep_range() {
   local start="$1"
   local end="$2"
-  local term="$3"
-  local nb_dir="$4"
+  local nb_dir="$3"
+  shift 3
+  # Remaining args are passed through to grep (flags + pattern).
+  # -I (capital) means case-sensitive — suppresses the default -i.
+  # The last arg is treated as the display term for the "no matches" message.
+  local case_flag="-i"
+  local grep_args=()
+  local a; for a in "$@"; do
+    if [[ "$a" == "-I" ]]; then case_flag=""; else grep_args+=("$a"); fi
+  done
+  local term="${grep_args[-1]}"
   local tmp_files
   tmp_files="$(mktemp)"
   _cal_files_in_range "$start" "$end" "$nb_dir" > "$tmp_files"
@@ -332,7 +546,7 @@ _cal_grep_range() {
   while IFS= read -r fpath; do
     [[ -z "$fpath" ]] && continue
     local matches
-    matches="$(grep -in --color=always "$term" "$fpath" 2>/dev/null)"
+    matches="$(grep -n $case_flag --color=always "${grep_args[@]}" "$fpath" 2>/dev/null)"
     if [[ -n "$matches" ]]; then
       local base="${fpath##*/}"
       local date_str="${base:0:8}"
@@ -354,7 +568,7 @@ _cal() {
   local notebook=""
   local start_date=""
   local end_date=""
-  local grep_term=""
+  local grep_args=()
   local target_year
   local target_month
   local mode="calendar"
@@ -395,9 +609,19 @@ _cal() {
         [[ "$mode" == "calendar" ]] && mode="list"
         ;;
       g)
-        (( i++ )) || true
-        grep_term="${args[$i]:-}"
         mode="grep"
+        # Consume all remaining args (except trailing notebook:) as grep args
+        (( i++ )) || true
+        while [[ $i -lt ${#args[@]} ]]; do
+          local ga="${args[$i]}"
+          if [[ "$ga" == *: ]]; then
+            notebook="${ga%:}"
+          else
+            grep_args+=("$ga")
+          fi
+          (( i++ )) || true
+        done
+        break
         ;;
       # YYYY-MM
       [0-9][0-9][0-9][0-9]-[0-9][0-9]|[0-9][0-9][0-9][0-9]/[0-9][0-9])
@@ -439,9 +663,9 @@ _cal() {
   fi
 
   case "$mode" in
-    calendar) _cal_show_month "$target_year" "$target_month" "$nb_dir" ;;
+    calendar) _cal_browse "$nb_dir" "$target_year" "$target_month" ;;
     list)     _cal_list_range "$start_date" "$end_date" "$nb_dir" ;;
-    grep)     _cal_grep_range "$start_date" "$end_date" "$grep_term" "$nb_dir" ;;
+    grep)     _cal_grep_range "$start_date" "$end_date" "$nb_dir" "${grep_args[@]}" ;;
   esac
 }
 
