@@ -33,6 +33,9 @@ _cal_notebook_dir() {
   local nb_dir="${NB_DIR:-${HOME}/.nb}"
   if [[ -n "$notebook" ]]; then
     printf '%s/%s' "$nb_dir" "$notebook"
+  elif [[ -n "${NB_NOTEBOOK_PATH:-}" ]]; then
+    # nb sets this when a notebook: scope is used — most reliable source
+    printf '%s' "${NB_NOTEBOOK_PATH%/}"
   else
     local current
     current="$(cat "${nb_dir}/.current" 2>/dev/null || echo "home")"
@@ -66,6 +69,19 @@ _cal_parse_date() {
   # Month name alone → first of that month, current year
   resolved="$(date -d "$input 1" +%Y%m%d 2>/dev/null)"
   [[ -n "$resolved" ]] && printf '%s' "$resolved"
+}
+
+# Returns 0 if $1 looks like a date value, 1 if it's likely a subcommand/flag.
+# GNU date accepts almost any string as "today", so we whitelist date-like patterns
+# rather than relying on parse success.
+_cal_is_date_arg() {
+  local v="${1,,}"
+  [[ "$v" =~ ^[0-9]          ]] && return 0  # digit-leading: YYYY, YYYYMMDD …
+  [[ "$v" == *-*             ]] && return 0  # contains dash: YYYY-MM, YYYY-MM-DD
+  [[ "$v" =~ ^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec) ]] && return 0
+  [[ "$v" =~ ^(mon|tue|wed|thu|fri|sat|sun) ]] && return 0
+  [[ "$v" =~ ^(today|tomorrow|yesterday|last|next|this) ]] && return 0
+  return 1
 }
 
 # ── Date picker helpers ────────────────────────────────────────────────────────
@@ -128,20 +144,27 @@ _cal_picker_draw() {
 # Returns nothing (exit 1) on cancel.
 
 _cal_datepicker() {
+  local nb_dir="${1:-}"   # optional: if set, show notes panel (browse layout)
   local cy cm cd
   cy="$(date +%Y)"; cm="$(date +%m)"; cd="$(date +%d)"
   local today; today="$(date +%Y%m%d)"
 
   # Terminal setup — save settings, go raw, hide cursor
-  local old_stty; old_stty="$(stty -g 2>/dev/null)"
+  # _CAL_OLD_STTY is module-level (not local) so the EXIT trap can reference it
+  # after the function returns (local vars are gone by then — set -u would error).
+  _CAL_OLD_STTY="$(stty -g 2>/dev/null)"
   stty raw -echo 2>/dev/null
   printf '\033[?25l' >/dev/tty   # hide cursor
 
   # Restore terminal on any exit
-  trap 'stty "$old_stty" 2>/dev/null; printf "\033[?25h\n" >/dev/tty' EXIT INT TERM
+  trap 'stty "${_CAL_OLD_STTY:-}" 2>/dev/null; printf "\033[?25h\n" >/dev/tty' EXIT INT TERM
 
   # First draw
-  _cal_picker_draw "$cy" "$cm" "$cd" "$today"
+  if [[ -n "$nb_dir" ]]; then
+    _cal_browse_draw "$cy" "$cm" "$cd" "$today" "$nb_dir"
+  else
+    _cal_picker_draw "$cy" "$cm" "$cd" "$today"
+  fi
 
   local result="" done=0
   while [[ $done -eq 0 ]]; do
@@ -151,25 +174,27 @@ _cal_datepicker() {
       key="${key}${k2}"
     fi
 
+    local _redraw=0
     case "$key" in
       $'\033[C'|l) # right — next day
         local p; p="$(date -d "${cy}-${cm}-${cd} +1 day"  '+%Y %m %d' 2>/dev/null)"
-        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" && _redraw=1 ;;
       $'\033[D'|h) # left — prev day
         local p; p="$(date -d "${cy}-${cm}-${cd} -1 day"  '+%Y %m %d' 2>/dev/null)"
-        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" && _redraw=1 ;;
       $'\033[B'|j) # down — next week
         local p; p="$(date -d "${cy}-${cm}-${cd} +7 days" '+%Y %m %d' 2>/dev/null)"
-        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" && _redraw=1 ;;
       $'\033[A'|k) # up — prev week
         local p; p="$(date -d "${cy}-${cm}-${cd} -7 days" '+%Y %m %d' 2>/dev/null)"
-        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" && _redraw=1 ;;
       '>'|']'|$'\033[6~') # next month
         local p; p="$(date -d "${cy}-${cm}-01 +1 month" '+%Y %m' 2>/dev/null)"
         if [[ -n "$p" ]]; then
           IFS=' ' read -r cy cm <<< "$p"
           local dim; dim="$(date -d "${cy}-${cm}-01 +1 month -1 day" +%d)"
           [[ "${cd#0}" -gt "${dim#0}" ]] && cd="$dim"
+          _redraw=1
         fi ;;
       '<'|'['|$'\033[5~') # prev month
         local p; p="$(date -d "${cy}-${cm}-01 -1 month" '+%Y %m' 2>/dev/null)"
@@ -177,24 +202,30 @@ _cal_datepicker() {
           IFS=' ' read -r cy cm <<< "$p"
           local dim; dim="$(date -d "${cy}-${cm}-01 +1 month -1 day" +%d)"
           [[ "${cd#0}" -gt "${dim#0}" ]] && cd="$dim"
+          _redraw=1
         fi ;;
       ''|$'\r'|$'\n'|' ') # Enter / Space — select ('' catches \r stripped by read)
         result="${cy}${cm}${cd}"
         done=1 ;;
       q|Q|$'\033') # q / Esc — cancel
         done=1 ;;
+      *) ;;  # unrecognised key — ignore
     esac
 
-    if [[ $done -eq 0 ]]; then
-      # Scroll back, clear old content, redraw in place
-      printf '\033[%dA\033[J' "$_CAL_PICKER_LINES" >/dev/tty
-      _cal_picker_draw "$cy" "$cm" "$cd" "$today"
+    if [[ $done -eq 0 && $_redraw -eq 1 ]]; then
+      if [[ -n "$nb_dir" ]]; then
+        printf '\033[%dA\033[J' "$_CAL_BROWSE_LINES" >/dev/tty
+        _cal_browse_draw "$cy" "$cm" "$cd" "$today" "$nb_dir"
+      else
+        printf '\033[%dA\033[J' "$_CAL_PICKER_LINES" >/dev/tty
+        _cal_picker_draw "$cy" "$cm" "$cd" "$today"
+      fi
     fi
   done
 
   # Restore terminal
   trap - EXIT INT TERM
-  stty "$old_stty" 2>/dev/null
+  stty "${_CAL_OLD_STTY:-}" 2>/dev/null
   printf '\033[?25h\n' >/dev/tty   # show cursor
 
   [[ -n "$result" ]] && printf '%s' "$result"
@@ -339,10 +370,10 @@ _cal_browse() {
   fi
   local today; today="$(date +%Y%m%d)"
 
-  local old_stty; old_stty="$(stty -g 2>/dev/null)"
+  _CAL_OLD_STTY="$(stty -g 2>/dev/null)"
   stty raw -echo 2>/dev/null
   printf '\033[?25l' >/dev/tty
-  trap 'stty "$old_stty" 2>/dev/null; printf "\033[?25h\n" >/dev/tty' EXIT INT TERM
+  trap 'stty "${_CAL_OLD_STTY:-}" 2>/dev/null; printf "\033[?25h\n" >/dev/tty' EXIT INT TERM
 
   _cal_browse_draw "$cy" "$cm" "$cd" "$today" "$nb_dir"
 
@@ -354,25 +385,27 @@ _cal_browse() {
       key="${key}${k2}"
     fi
 
+    local _redraw=0
     case "$key" in
       $'\033[C'|l)
         local p; p="$(date -d "${cy}-${cm}-${cd} +1 day"  '+%Y %m %d' 2>/dev/null)"
-        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" && _redraw=1 ;;
       $'\033[D'|h)
         local p; p="$(date -d "${cy}-${cm}-${cd} -1 day"  '+%Y %m %d' 2>/dev/null)"
-        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" && _redraw=1 ;;
       $'\033[B'|j)
         local p; p="$(date -d "${cy}-${cm}-${cd} +7 days" '+%Y %m %d' 2>/dev/null)"
-        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" && _redraw=1 ;;
       $'\033[A'|k)
         local p; p="$(date -d "${cy}-${cm}-${cd} -7 days" '+%Y %m %d' 2>/dev/null)"
-        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" ;;
+        [[ -n "$p" ]] && IFS=' ' read -r cy cm cd <<< "$p" && _redraw=1 ;;
       '>'|']'|$'\033[6~')
         local p; p="$(date -d "${cy}-${cm}-01 +1 month" '+%Y %m' 2>/dev/null)"
         if [[ -n "$p" ]]; then
           IFS=' ' read -r cy cm <<< "$p"
           local dim; dim="$(date -d "${cy}-${cm}-01 +1 month -1 day" +%d)"
           [[ "${cd#0}" -gt "${dim#0}" ]] && cd="$dim"
+          _redraw=1
         fi ;;
       '<'|'['|$'\033[5~')
         local p; p="$(date -d "${cy}-${cm}-01 -1 month" '+%Y %m' 2>/dev/null)"
@@ -380,13 +413,15 @@ _cal_browse() {
           IFS=' ' read -r cy cm <<< "$p"
           local dim; dim="$(date -d "${cy}-${cm}-01 +1 month -1 day" +%d)"
           [[ "${cd#0}" -gt "${dim#0}" ]] && cd="$dim"
+          _redraw=1
         fi ;;
       ''|$'\r'|$'\n') # Enter — select date
         result="${cy}${cm}${cd}"; done=1 ;;
       q|Q|$'\033') done=1 ;;
+      *) ;;  # unrecognised key — ignore
     esac
 
-    if [[ $done -eq 0 ]]; then
+    if [[ $done -eq 0 && $_redraw -eq 1 ]]; then
       printf '\033[%dA\033[J' "$_CAL_BROWSE_LINES" >/dev/tty
       _cal_browse_draw "$cy" "$cm" "$cd" "$today" "$nb_dir"
     fi
@@ -395,7 +430,7 @@ _cal_browse() {
   # Clear interactive display before handing back to normal output
   printf '\033[%dA\033[J' "$_CAL_BROWSE_LINES" >/dev/tty
   trap - EXIT INT TERM
-  stty "$old_stty" 2>/dev/null
+  stty "${_CAL_OLD_STTY:-}" 2>/dev/null
   printf '\033[?25h' >/dev/tty
 
   # If Enter was pressed (not q), list notes for the selected date
@@ -542,9 +577,10 @@ _cal_grep_range() {
   local tmp_files
   tmp_files="$(mktemp)"
   _cal_files_in_range "$start" "$end" "$nb_dir" > "$tmp_files"
-  local found=0
+  local found=0 file_count=0
   while IFS= read -r fpath; do
     [[ -z "$fpath" ]] && continue
+    file_count=$(( file_count + 1 ))
     local matches
     matches="$(grep -n $case_flag --color=always "${grep_args[@]}" "$fpath" 2>/dev/null)"
     if [[ -n "$matches" ]]; then
@@ -559,7 +595,16 @@ _cal_grep_range() {
     fi
   done < "$tmp_files"
   rm -f "$tmp_files"
-  [[ "$found" -eq 0 ]] && printf 'No matches for "%s" in range %s – %s\n' "$term" "$start" "$end"
+  if [[ "$found" -eq 0 ]]; then
+    local notebook_name="${nb_dir##*/}"
+    if [[ "$file_count" -eq 0 ]]; then
+      printf 'No date-prefixed files in [%s] for range %s – %s\n' "$notebook_name" "$start" "$end"
+      printf '  (searched: %s)\n' "$nb_dir"
+    else
+      printf 'No matches for "%s" in [%s], %d file(s), range %s – %s\n' \
+        "$term" "$notebook_name" "$file_count" "$start" "$end"
+    fi
+  fi
 }
 
 # ── Main dispatch ─────────────────────────────────────────────────────────────
@@ -577,6 +622,13 @@ _cal() {
   target_month="$(date +%m)"
 
   local args=("$@")
+
+  # Pre-scan for notebook: so the date-picker uses the right directory
+  # even when the scope appears after --start/--end in the arg list.
+  local a; for a in "${args[@]}"; do
+    [[ "$a" == *: && "$a" != --* ]] && notebook="${a%:}"
+  done
+
   local i=0
   while [[ $i -lt ${#args[@]} ]]; do
     local arg="${args[$i]}"
@@ -586,25 +638,25 @@ _cal() {
         ;;
       --start)
         (( i++ )) || true
-        start_date="${args[$i]:-}"
-        if [[ -z "$start_date" || "$start_date" == --* ]]; then
+        local _sv="${args[$i]:-}"
+        if [[ -z "$_sv" || "$_sv" == --* || "$_sv" == *: ]] || ! _cal_is_date_arg "$_sv"; then
           (( i-- )) || true
           local _pdir; _pdir="$(_cal_notebook_dir "$notebook")"
           start_date="$(_cal_datepicker "$_pdir")" || { printf 'Cancelled.\n' >&2; return 1; }
         else
-          start_date="$(_cal_parse_date "$start_date")"
+          start_date="$(_cal_parse_date "$_sv")"
         fi
         [[ "$mode" == "calendar" ]] && mode="list"
         ;;
       --end)
         (( i++ )) || true
-        end_date="${args[$i]:-}"
-        if [[ -z "$end_date" || "$end_date" == --* ]]; then
+        local _ev="${args[$i]:-}"
+        if [[ -z "$_ev" || "$_ev" == --* || "$_ev" == *: ]] || ! _cal_is_date_arg "$_ev"; then
           (( i-- )) || true
           local _pdir; _pdir="$(_cal_notebook_dir "$notebook")"
           end_date="$(_cal_datepicker "$_pdir")" || { printf 'Cancelled.\n' >&2; return 1; }
         else
-          end_date="$(_cal_parse_date "$end_date")"
+          end_date="$(_cal_parse_date "$_ev")"
         fi
         [[ "$mode" == "calendar" ]] && mode="list"
         ;;

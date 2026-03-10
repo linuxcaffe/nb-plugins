@@ -17,32 +17,38 @@ _subcommands add "nb_grep"
 
 _subcommands describe "nb_grep" <<'HEREDOC'
 Usage:
-  nb nb_grep [-C <n>] [-A <n>] [-B <n>] [-I] [-l] [<notebook>:] <pattern>
+  nb nb_grep [-C <n>] [-A <n>] [-B <n>] [-I] [-w] [-F] [-v] [-e <pat>] [-l] [<notebook>:] <pattern>
 
 Alias:
   nb g
 
 Options:
-  -C, --context <n>   Lines of context around each match (default: 2)
-  -A, --after   <n>   Lines after each match
-  -B, --before  <n>   Lines before each match
-  -I, --ignore-case   Case-insensitive search
-  -l, --list          List matching note titles only (no context body)
+  -C, --context <n>     Lines of context around each match (default: 1)
+  -A, --after   <n>     Lines after each match
+  -B, --before  <n>     Lines before each match
+  -I, --case-sensitive  Case-sensitive search (default is case-insensitive)
+  -w, --word            Whole-word matches only
+  -F, --fixed           Literal string, no regex (useful for [tags], URLs, etc.)
+  -v, --invert          List notes NOT containing the pattern (implies -l)
+  -e <pattern>          Extra pattern; repeatable, OR logic
+  -l, --list            List matching note titles only (no context body)
 
 Description:
   Search nb notes with context lines, like grep -C. Results are grouped
-  by note with nb-style headers, distinguishing matched lines (│) from
-  surrounding context lines (·).
+  by note with nb-style headers.
 
-  The default context depth can be set with the NB_GREP_CONTEXT
-  environment variable.
-
+  Multiple patterns (-e or positional args) use OR logic.
+  The default context depth can be set with NB_GREP_CONTEXT.
   Uses ripgrep (rg) if available for file discovery, grep for context output.
 
 Examples:
   nb g "login bug"
   nb g -C 4 "auth middleware"
-  nb g -I "taskwarrior" tasks:
+  nb g -I "TaskWarrior" tasks:
+  nb g -w "do"
+  nb g -F "[project.home]"
+  nb g -v "done" tasks:
+  nb g -e "foo" -e "bar"
   nb g -l "abc12345"
   NB_GREP_CONTEXT=5 nb g "pattern"
 HEREDOC
@@ -53,27 +59,34 @@ _nb_grep() {
   local _context="${NB_GREP_CONTEXT:-1}"
   local _after=""
   local _before=""
-  local _ignore_case=0
+  local _case_flag="-i"   # cleared by -I (case-sensitive)
+  local _word=0
+  local _fixed=0
+  local _invert=0
   local _list_only=0
   local _notebook_filter=""
-  local _pattern=""
+  local _patterns=()
 
   # --- parse args ---
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -C|--context)     shift; _context="$1"        ;;
-      -A|--after)       shift; _after="$1"           ;;
-      -B|--before)      shift; _before="$1"          ;;
-      -I|--ignore-case) _ignore_case=1               ;;
-      -l|--list)        _list_only=1                 ;;
-      -*)               :                            ;;  # ignore unknown flags
-      *:)               _notebook_filter="${1%:}"    ;;  # notebook: selector
-      *)                _pattern="$1"               ;;
+      -C|--context)        shift; _context="$1"         ;;
+      -A|--after)          shift; _after="$1"            ;;
+      -B|--before)         shift; _before="$1"           ;;
+      -I|--case-sensitive) _case_flag=""                 ;;
+      -w|--word)           _word=1                       ;;
+      -F|--fixed)          _fixed=1                      ;;
+      -v|--invert)         _invert=1                     ;;
+      -e)                  shift; _patterns+=("$1")      ;;
+      -l|--list)           _list_only=1                  ;;
+      -*)                  :                             ;;
+      *:)                  _notebook_filter="${1%:}"     ;;
+      *)                   _patterns+=("$1")             ;;
     esac
     shift
   done
 
-  if [[ -z "${_pattern}" ]]; then
+  if [[ ${#_patterns[@]} -eq 0 ]]; then
     _help "nb_grep"
     return 1
   fi
@@ -89,11 +102,20 @@ _nb_grep() {
     fi
   fi
 
-  # --- build args ---
-  local _case_arg_grep=()
-  [[ $_ignore_case -eq 1 ]] && _case_arg_grep=("-i")
+  # --- build match flags (shared by grep and rg) ---
+  local _match_flags=()
+  [[ -n "$_case_flag" ]] && _match_flags+=("$_case_flag")
+  [[ $_word  -eq 1 ]]    && _match_flags+=("-w")
+  [[ $_fixed -eq 1 ]]    && _match_flags+=("-F")
 
-  # Context flags for grep pass 2
+  # one -e per pattern (OR logic; works for both grep and rg)
+  local _e_flags=()
+  local _p; for _p in "${_patterns[@]}"; do _e_flags+=("-e" "$_p"); done
+
+  # -v has no context to display — force list mode
+  [[ $_invert -eq 1 ]] && _list_only=1
+
+  # context flags for grep pass 2
   local _ctx_args=()
   if [[ -n "${_after}" || -n "${_before}" ]]; then
     [[ -n "${_after}" ]]  && _ctx_args+=("-A" "${_after}")
@@ -102,17 +124,21 @@ _nb_grep() {
     _ctx_args+=("-C" "${_context}")
   fi
 
-  # --- pass 1: find matching files (temp file, no process substitution) ---
+  # --- pass 1: find matching (or non-matching) files ---
   local _tmp_list
   _tmp_list="$(mktemp)"
 
   if command -v rg &>/dev/null; then
-    rg --files-with-matches --glob "*.md" --color=never \
-      "${_case_arg_rg[@]}" "${_pattern}" "${_search_root}" \
+    local _rg_mode="--files-with-matches"
+    [[ $_invert -eq 1 ]] && _rg_mode="--files-without-match"
+    rg "$_rg_mode" --glob "*.md" --color=never \
+      "${_match_flags[@]}" "${_e_flags[@]}" "${_search_root}" \
       2>/dev/null | sort > "${_tmp_list}"
   else
-    /usr/bin/grep -rl --include="*.md" \
-      "${_case_arg_grep[@]}" "${_pattern}" "${_search_root}" \
+    local _grep_mode="-rl"
+    [[ $_invert -eq 1 ]] && _grep_mode="-rL"
+    /usr/bin/grep "$_grep_mode" --include="*.md" \
+      "${_match_flags[@]}" "${_e_flags[@]}" "${_search_root}" \
       2>/dev/null | sort > "${_tmp_list}"
   fi
 
@@ -121,7 +147,7 @@ _nb_grep() {
   rm -f "${_tmp_list}"
 
   if [[ ${#_matching_files[@]} -eq 0 ]]; then
-    printf "No results for: %s\n" "$(_color_primary "${_pattern}")"
+    printf "No results for: %s\n" "$(_color_primary "${_patterns[*]}")"
     return 0
   fi
 
@@ -152,10 +178,10 @@ _nb_grep() {
     _info_line="$(_show "${_sel}" --info-line 2>/dev/null || basename "${_f}")"
     printf "%s\n%s\n" "${_info_line}" "${_divider}"
 
-    # pass 2: grep with colour (match term highlighted) into temp file
+    # pass 2: grep with colour into temp file
     /usr/bin/grep -n --color=always \
-      "${_ctx_args[@]}" "${_case_arg_grep[@]}" \
-      "${_pattern}" "${_f}" > "${_tmp_ctx}" 2>/dev/null
+      "${_ctx_args[@]}" "${_match_flags[@]}" "${_e_flags[@]}" \
+      "${_f}" > "${_tmp_ctx}" 2>/dev/null
 
     while IFS= read -r _line; do
       if [[ "${_line}" == "--" ]]; then
