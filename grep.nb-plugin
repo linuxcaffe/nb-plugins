@@ -115,6 +115,10 @@ _nb_grep() {
   # -v has no context to display — force list mode
   [[ $_invert -eq 1 ]] && _list_only=1
 
+  # colour only when writing directly to a terminal
+  local _color_flag="--color=always"
+  [[ -t 1 ]] || _color_flag="--color=never"
+
   # context flags for grep pass 2
   local _ctx_args=()
   if [[ -n "${_after}" || -n "${_before}" ]]; then
@@ -131,13 +135,13 @@ _nb_grep() {
   if command -v rg &>/dev/null; then
     local _rg_mode="--files-with-matches"
     [[ $_invert -eq 1 ]] && _rg_mode="--files-without-match"
-    rg "$_rg_mode" --glob "*.md" --color=never \
+    rg "$_rg_mode" --follow --glob "*.md" --color=never \
       "${_match_flags[@]}" "${_e_flags[@]}" "${_search_root}" \
       2>/dev/null | sort > "${_tmp_list}"
   else
     local _grep_mode="-rl"
     [[ $_invert -eq 1 ]] && _grep_mode="-rL"
-    /usr/bin/grep "$_grep_mode" --include="*.md" \
+    /usr/bin/grep -E "$_grep_mode" --include="*.md" \
       "${_match_flags[@]}" "${_e_flags[@]}" "${_search_root}" \
       2>/dev/null | sort > "${_tmp_list}"
   fi
@@ -151,35 +155,46 @@ _nb_grep() {
     return 0
   fi
 
+  # header helper: nb's _show --info-line may write directly to /dev/tty,
+  # which would corrupt the terminal on redirect — use plain path when not a tty
+  _nb_grep_header() {
+    local _f="$1" _nb_dir="$2"
+    if [[ -t 1 ]]; then
+      local _rp="${_f#${_nb_dir}/}" _sel
+      _sel="${_rp%%/*}:${_rp#*/}"
+      _show "${_sel}" --info-line 2>/dev/null || printf "%s\n" "${_f}"
+    else
+      printf "%s\n" "${_f#${_nb_dir}/}"
+    fi
+  }
+
   # --- list mode: note headers only ---
   if [[ $_list_only -eq 1 ]]; then
-    local _f _rp _sel
+    local _f
     for _f in "${_matching_files[@]}"; do
-      _rp="${_f#${_nb_dir}/}"; _sel="${_rp%%/*}:${_rp#*/}"
-      _show "${_sel}" --info-line 2>/dev/null || printf "%s\n" "${_f}"
+      _nb_grep_header "$_f" "$_nb_dir"
     done
     return 0
   fi
 
   # --- full mode: context output grouped by note ---
-  local _divider
-  _divider="$(_color_muted "$(printf '%.0s─' {1..48})")"
+  local _divider="$(printf '%.0s─' {1..48})"
+  [[ -t 1 ]] && _divider="$(_color_muted "$_divider")"
   local _first=1
   local _tmp_ctx
   _tmp_ctx="$(mktemp)"
 
-  local _f _rp _sel
+  local _f
   for _f in "${_matching_files[@]}"; do
     [[ $_first -eq 0 ]] && printf "\n"
     _first=0
 
-    _rp="${_f#${_nb_dir}/}"; _sel="${_rp%%/*}:${_rp#*/}"
     local _info_line
-    _info_line="$(_show "${_sel}" --info-line 2>/dev/null || basename "${_f}")"
+    _info_line="$(_nb_grep_header "$_f" "$_nb_dir")"
     printf "%s\n%s\n" "${_info_line}" "${_divider}"
 
     # pass 2: grep with colour into temp file
-    /usr/bin/grep -n --color=always \
+    /usr/bin/grep -En "$_color_flag" \
       "${_ctx_args[@]}" "${_match_flags[@]}" "${_e_flags[@]}" \
       "${_f}" > "${_tmp_ctx}" 2>/dev/null
 

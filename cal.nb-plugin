@@ -567,30 +567,43 @@ _cal_grep_range() {
   shift 3
   # Remaining args are passed through to grep (flags + pattern).
   # -I (capital) means case-sensitive — suppresses the default -i.
+  # -l (list) shows only note headers, no match lines.
   # The last arg is treated as the display term for the "no matches" message.
   local case_flag="-i"
+  local list_only=0
   local grep_args=()
   local a; for a in "$@"; do
-    if [[ "$a" == "-I" ]]; then case_flag=""; else grep_args+=("$a"); fi
+    if [[ "$a" == "-I" ]]; then case_flag=""
+    elif [[ "$a" == "-l" ]]; then list_only=1
+    else grep_args+=("$a"); fi
   done
-  local term="${grep_args[-1]}"
+  local term="${grep_args[-1]:-}"
   local tmp_files
   tmp_files="$(mktemp)"
   _cal_files_in_range "$start" "$end" "$nb_dir" > "$tmp_files"
   local found=0 file_count=0
+  local notebook="${nb_dir##*/}"
   while IFS= read -r fpath; do
     [[ -z "$fpath" ]] && continue
     file_count=$(( file_count + 1 ))
     local matches
-    matches="$(grep -n $case_flag --color=always "${grep_args[@]}" "$fpath" 2>/dev/null)"
+    matches="$(/usr/bin/grep -n $case_flag --color=always "${grep_args[@]}" "$fpath" 2>/dev/null)" || true
     if [[ -n "$matches" ]]; then
       local base="${fpath##*/}"
       local date_str="${base:0:8}"
       local date_fmt
       date_fmt="$(date -d "${date_str:0:4}-${date_str:4:2}-${date_str:6:2}" +%Y-%m-%d 2>/dev/null || printf '%s' "$date_str")"
-      printf "${_CAL_HEADER}── %s  %s ──${_CAL_RESET}\n" "$date_fmt" "$base"
-      printf '%s\n' "$matches"
-      printf '\n'
+      local id; id="$(_cal_nb_id "$fpath" "$nb_dir")"
+      local title; title="$(head -1 "$fpath" 2>/dev/null | sed 's/^#* *//')"
+      [[ -z "$title" ]] && title="(untitled)"
+      if [[ "$list_only" -eq 1 ]]; then
+        printf "${_CAL_HAS_NOTES}[%s:%s]${_CAL_RESET}  %s  %s\n" \
+          "$notebook" "$id" "$date_fmt" "$title"
+      else
+        printf "${_CAL_HEADER}── %s  %s ──${_CAL_RESET}\n" "$date_fmt" "$base"
+        printf '%s\n' "$matches"
+        printf '\n'
+      fi
       found=1
     fi
   done < "$tmp_files"

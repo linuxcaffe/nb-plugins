@@ -137,7 +137,7 @@ Both `nb g` (short alias) and `nb nb_grep` (full name) work.
 | `-B <n>` | Lines before each match |
 | `-I` | Case-sensitive search (default is case-insensitive) |
 | `-w` | Whole-word matches only |
-| `-F` | Literal string, no regex (useful for `[tags]`, URLs, etc.) |
+| `-F` | Literal string, no regex (useful for `[tags]`, URLs, etc.) — disables ERE |
 | `-v` | List notes NOT containing the pattern (implies `-l`) |
 | `-e <pattern>` | Extra pattern; repeatable, OR logic |
 | `-l` | List matching note titles only |
