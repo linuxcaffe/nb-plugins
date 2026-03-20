@@ -115,9 +115,12 @@ _nb_grep() {
   # -v has no context to display — force list mode
   [[ $_invert -eq 1 ]] && _list_only=1
 
-  # colour only when writing directly to a terminal
+  # colour only when writing directly to a terminal — capture ONCE here,
+  # before any $() subshells, since [[ -t 1 ]] is always false inside $()
+  local _is_tty=0
+  [[ -t 1 ]] && _is_tty=1
   local _color_flag="--color=always"
-  [[ -t 1 ]] || _color_flag="--color=never"
+  (( _is_tty )) || _color_flag="--color=never"
 
   # context flags for grep pass 2
   local _ctx_args=()
@@ -159,7 +162,7 @@ _nb_grep() {
   # which would corrupt the terminal on redirect — use plain path when not a tty
   _nb_grep_header() {
     local _f="$1" _nb_dir="$2"
-    if [[ -t 1 ]]; then
+    if (( _is_tty )); then
       local _rp="${_f#${_nb_dir}/}" _sel
       _sel="${_rp%%/*}:${_rp#*/}"
       _show "${_sel}" --info-line 2>/dev/null || printf "%s\n" "${_f}"
@@ -211,5 +214,4 @@ _nb_grep() {
 }
 
 _subcommands add "g"
-_g() { _nb_grep "$@"; }
 _alias_subcommand "nb_grep" "g"

@@ -128,6 +128,21 @@ NB_GREP_CONTEXT=3 nb g <pattern>    # set default context via env var
 
 Both `nb g` (short alias) and `nb nb_grep` (full name) work.
 
+### Regex examples
+
+The plugin uses ERE (extended regular expressions) by default — the same dialect as `grep -E` and `rg`. Use `-F` to disable regex and search for a literal string.
+
+```bash
+nb g "meeting|standup"              # OR: notes matching either word
+nb g "(TODO|FIXME|HACK)"            # any of three keywords
+nb g "^#+ "                         # lines that are markdown headings
+nb g "\+\w+"                        # taskwarrior-style tags (+word)
+nb g "[0-9]{4}-[0-9]{2}-[0-9]{2}"  # ISO date pattern
+nb g "https?://"                    # any URL
+nb g -C 3 "def \w+\("               # function definitions, 3 lines context
+nb g -F "[project.home]"            # -F: literal string, brackets not special
+```
+
 ### Options
 
 | Flag | Description |
