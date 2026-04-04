@@ -154,7 +154,9 @@ _nb_grep() {
   rm -f "${_tmp_list}"
 
   if [[ ${#_matching_files[@]} -eq 0 ]]; then
-    printf "No results for: %s\n" "$(_color_primary "${_patterns[*]}")"
+    local _pat_str="${_patterns[*]}"
+    (( _is_tty )) && _pat_str="$(_color_primary "${_pat_str}")"
+    printf "No results for: %s\n" "${_pat_str}"
     return 0
   fi
 
@@ -182,7 +184,7 @@ _nb_grep() {
 
   # --- full mode: context output grouped by note ---
   local _divider="$(printf '%.0s─' {1..48})"
-  [[ -t 1 ]] && _divider="$(_color_muted "$_divider")"
+  (( _is_tty )) && _divider="$(_color_muted "$_divider")"
   local _first=1
   local _tmp_ctx
   _tmp_ctx="$(mktemp)"
@@ -203,7 +205,7 @@ _nb_grep() {
 
     while IFS= read -r _line; do
       if [[ "${_line}" == "--" ]]; then
-        printf "  %s\n" "$(_color_muted "···")"
+        (( _is_tty )) && printf "  %s\n" "$(_color_muted "···")" || printf "  ···\n"
       else
         printf "  %s\n" "${_line}"
       fi

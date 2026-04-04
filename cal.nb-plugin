@@ -569,6 +569,17 @@ _cal_grep_range() {
   # -I (capital) means case-sensitive — suppresses the default -i.
   # -l (list) shows only note headers, no match lines.
   # The last arg is treated as the display term for the "no matches" message.
+
+  # TTY detection — capture before any $() subshells ([[ -t 1 ]] is false inside $())
+  local _is_tty=0
+  [[ -t 1 ]] && _is_tty=1
+  local _color_flag="--color=never"
+  (( _is_tty )) && _color_flag="--color=always"
+  local _h=""  _n=""  _r=""   # header / has-notes / reset — empty when not a TTY
+  if (( _is_tty )); then
+    _h="$_CAL_HEADER"  _n="$_CAL_HAS_NOTES"  _r="$_CAL_RESET"
+  fi
+
   local case_flag="-i"
   local list_only=0
   local grep_args=()
@@ -587,7 +598,7 @@ _cal_grep_range() {
     [[ -z "$fpath" ]] && continue
     file_count=$(( file_count + 1 ))
     local matches
-    matches="$(/usr/bin/grep -n $case_flag --color=always "${grep_args[@]}" "$fpath" 2>/dev/null)" || true
+    matches="$(/usr/bin/grep -n $case_flag "$_color_flag" "${grep_args[@]}" "$fpath" 2>/dev/null)" || true
     if [[ -n "$matches" ]]; then
       local base="${fpath##*/}"
       local date_str="${base:0:8}"
@@ -597,10 +608,10 @@ _cal_grep_range() {
       local title; title="$(head -1 "$fpath" 2>/dev/null | sed 's/^#* *//')"
       [[ -z "$title" ]] && title="(untitled)"
       if [[ "$list_only" -eq 1 ]]; then
-        printf "${_CAL_HAS_NOTES}[%s:%s]${_CAL_RESET}  %s  %s\n" \
+        printf "${_n}[%s:%s]${_r}  %s  %s\n" \
           "$notebook" "$id" "$date_fmt" "$title"
       else
-        printf "${_CAL_HEADER}── %s  %s ──${_CAL_RESET}\n" "$date_fmt" "$base"
+        printf "${_h}── %s  %s ──${_r}\n" "$date_fmt" "$base"
         printf '%s\n' "$matches"
         printf '\n'
       fi
