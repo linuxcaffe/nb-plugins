@@ -370,10 +370,10 @@ _cal_browse() {
   fi
   local today; today="$(date +%Y%m%d)"
 
-  _CAL_OLD_STTY="$(stty -g 2>/dev/null)"
-  stty raw -echo 2>/dev/null
+  _CAL_OLD_STTY="$(stty -g </dev/tty 2>/dev/null)"
+  stty raw -echo </dev/tty 2>/dev/null
   printf '\033[?25l' >/dev/tty
-  trap 'stty "${_CAL_OLD_STTY:-}" 2>/dev/null; printf "\033[?25h\n" >/dev/tty' EXIT INT TERM
+  trap 'stty "${_CAL_OLD_STTY:-}" </dev/tty 2>/dev/null; printf "\033[?25h\n" >/dev/tty' EXIT INT TERM
 
   _cal_browse_draw "$cy" "$cm" "$cd" "$today" "$nb_dir"
 
@@ -430,7 +430,7 @@ _cal_browse() {
   # Clear interactive display before handing back to normal output
   printf '\033[%dA\033[J' "$_CAL_BROWSE_LINES" >/dev/tty
   trap - EXIT INT TERM
-  stty "${_CAL_OLD_STTY:-}" 2>/dev/null
+  stty "${_CAL_OLD_STTY:-}" </dev/tty 2>/dev/null
   printf '\033[?25h' >/dev/tty
 
   # If Enter was pressed (not q), list notes for the selected date
