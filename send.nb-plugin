@@ -210,18 +210,32 @@ _nb_send() {
 
   _log "resolved — folder: ${_folder:-(root)}  filename: ${_filename_in}"
 
-  # ── Import via nb ─────────────────────────────────────────────────────────
-  local _selector="${_notebook}:${_folder:+${_folder}/}${_filename_in}"
-  _log "selector: ${_selector}"
+  # ── Copy + index + git commit ─────────────────────────────────────────────
+  # Manual approach: nb import copy mangles filenames for non-text types
+  # and does not reliably update subfolder .index files.
+  local _target_dir="${_nb_dir}/${_notebook}${_folder:+/${_folder}}"
+  _log "target dir: ${_target_dir}"
+  mkdir -p "${_target_dir}"
 
-  local _nb_bin; _nb_bin="$(command -v nb 2>/dev/null || printf "%s/.local/bin/nb" "${HOME}")"
-  if ! "${_nb_bin}" import copy "${_file}" "${_selector}" >> "${_log}" 2>&1; then
+  if ! cp "${_file}" "${_target_dir}/${_filename_in}"; then
     zenity --error --title="Send to nb" \
-      --text="Import failed. Check /tmp/nb-send.log for details." \
+      --text="Copy failed. Check /tmp/nb-send.log for details." \
       --width=360 2>/dev/null || true
     return 1
   fi
-  _log "import done"
+  _log "copied"
+
+  local _index="${_target_dir}/.index"
+  touch "${_index}"
+  grep -qxF "${_filename_in}" "${_index}" || printf "%s\n" "${_filename_in}" >> "${_index}"
+  _log "index updated"
+
+  local _rel_path="${_folder:+${_folder}/}${_filename_in}"
+  git -C "${_nb_dir}/${_notebook}" add \
+    -- "${_rel_path}" "${_folder:+${_folder}/}.index" 2>/dev/null || true
+  git -C "${_nb_dir}/${_notebook}" \
+    commit -m "[nb] Import: ${_rel_path}" >> "${_log}" 2>&1 || true
+  _log "git done"
 
   # ── Done ──────────────────────────────────────────────────────────────────
   zenity --info \
