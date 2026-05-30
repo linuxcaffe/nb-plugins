@@ -10,6 +10,7 @@ A collection of community plugins for [nb](https://xwmx.github.io/nb/) — the c
 |--------|---------|-------------|
 | [cal.nb-plugin](#calnb-plugin) | `nb cal` | Date-aware calendar view and range search for date-stamped notes |
 | [grep.nb-plugin](#grepnb-plugin) | `nb g` | Context-aware search — see surrounding lines, not just the match |
+| [send.nb-plugin](#sendnb-plugin) | `nb send` | Send a file to an nb notebook via a GUI dialog (zenity); desktop file manager integration |
 
 ---
 
@@ -156,6 +157,41 @@ nb g -F "[project.home]"            # -F: literal string, brackets not special
 | `-v` | List notes NOT containing the pattern (implies `-l`) |
 | `-e <pattern>` | Extra pattern; repeatable, OR logic |
 | `-l` | List matching note titles only |
+
+---
+
+## send.nb-plugin
+
+> For desktop Linux users — import any file from your file manager (Caja, Nemo, or terminal) directly into an nb notebook with a two-step GUI dialog.
+
+### What this does
+
+`nb send` opens a two-step zenity dialog: first choose a notebook, then choose a folder and optionally rename the file. The actual import — file copy, `.index` entry, git commit — is handled by nb's own `import copy` command.
+
+Calling convention is auto-detected:
+- **Nemo action**: called with a `file:///` URI argument
+- **Caja Scripts menu**: reads `$CAJA_SCRIPT_SELECTED_FILE_PATHS`
+- **Terminal**: plain file path argument
+
+Files with unrecognised MIME types (executables, unknown binaries) trigger a warning with the option to cancel or proceed. The original file extension is always preserved — the rename field accepts only the stem.
+
+### Install
+
+```bash
+nb plugin install https://raw.githubusercontent.com/linuxcaffe/nb-plugins/main/send.nb-plugin
+```
+
+For Caja / Nemo file manager integration, see [nb-desktop](https://github.com/linuxcaffe/nb-desktop).
+
+### Usage
+
+```bash
+nb send ~/Pictures/photo.jpg          # terminal — plain path
+nb send file:///home/djp/doc.pdf      # terminal — URI (as passed by Nemo)
+nb send                               # Caja script — reads env var automatically
+```
+
+All activity is logged to `/tmp/nb-send.log` — useful for debugging file manager invocations where there is no visible terminal.
 
 ---
 

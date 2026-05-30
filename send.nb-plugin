@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+###############################################################################
+# send.nb-plugin
+#
+# "Send to nb" — import a file into an nb notebook with an interactive GUI
+# dialog (zenity). The actual file copy, index update, and git commit are
+# handled by nb's own `import copy` command.
+#
+# Detects the calling convention automatically:
+#   Nemo action:  nb send <file:///path/to/file>   (URI argument)
+#   Caja script:  nb send                           ($CAJA_SCRIPT_SELECTED_FILE_PATHS)
+#   Terminal:     nb send /path/to/file             (plain path)
+#
+# Requires: zenity, file (libmagic)
+#
+# Install:
+#   nb plugin install /path/to/send.nb-plugin
+#
+# A plugin for `nb`.
+#   https://github.com/xwmx/nb
+###############################################################################
+
+_subcommands add "nb_send"
+
+_subcommands describe "nb_send" <<'HEREDOC'
+Usage:
+  nb send [<file-path-or-uri>]
+
+Description:
+  Send a file to an nb notebook using an interactive GUI dialog (zenity).
+  Uses nb's own `import copy` for the actual file operation — the extension,
+  index entry, and git commit are all handled natively by nb.
+
+  Auto-detects the file source:
+    - URI argument   file:///path/to/file  (Nemo action %f)
+    - Env var        $CAJA_SCRIPT_SELECTED_FILE_PATHS  (Caja Scripts menu)
+    - Plain path     /path/to/file  (terminal)
+
+  Step 1: choose a notebook.
+  Step 2: choose a folder and optionally rename the file (stem only —
+          the original extension is always preserved).
+
+  Files with unrecognised MIME types trigger a warning before import.
+  All activity is logged to /tmp/nb-send.log.
+
+Examples:
+  nb send ~/Pictures/photo.jpg
+  nb send file:///home/djp/Documents/report.pdf
+  nb send                                        # reads from Caja env var
+
+Alias:
+  nb send
+HEREDOC
+
+
+_nb_send() {
+  # Wrap in a subshell so the log redirect does not bleed into nb's own output.
+  (
+    local _nb_dir="${NB_DIR:-${HOME}/.nb}"
+    local _log="/tmp/nb-send.log"
+
+    exec > >(tee -a "${_log}") 2>&1
+    printf -- "--- nb send %s ---\n" "$(date)"
+
+    # ── Resolve file path ───────────────────────────────────────────────────
+    _decode_uri() {
+      local _p="${1#file://}"
+      printf '%b\n' "${_p//%/\\x}"
+    }
+
+    local _file=""
+    if [[ -n "${1:-}" ]]; then
+      _file="$(_decode_uri "$1")"
+      printf "source: argument URI/path\n"
+    else
+      local _selected="${CAJA_SCRIPT_SELECTED_FILE_PATHS:-${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}}"
+      if [[ -z "${_selected}" ]]; then
+        zenity --error --title="Send to nb" \
+          --text="No file provided.\n\nRun from a file manager or pass a path as an argument." \
+          2>/dev/null
+        exit 1
+      fi
+      _file="$(head -1 <<< "${_selected}")"
+      printf "source: env var CAJA/NAUTILUS_SCRIPT_SELECTED_FILE_PATHS\n"
+    fi
+
+    printf "file: %s\n" "${_file}"
+
+    if [[ ! -f "${_file}" ]]; then
+      zenity --error --title="Send to nb" \
+        --text="File not found:\n${_file}" 2>/dev/null
+      exit 1
+    fi
+
+    local _basename; _basename="$(basename "${_file}")"
+
+    # ── Extension handling ──────────────────────────────────────────────────
+    local _ext="" _stem=""
+    if [[ "${_basename}" == *.* && "${_basename:0:1}" != "." ]]; then
+      _ext=".${_basename##*.}"
+      _stem="${_basename%.*}"
+    else
+      _stem="${_basename}"
+    fi
+    printf "basename: %s  stem: %s  ext: %s\n" \
+      "${_basename}" "${_stem}" "${_ext:-(none)}"
+
+    # ── Binary file guard ───────────────────────────────────────────────────
+    local _mime; _mime="$(file --mime-type -b "${_file}" 2>/dev/null || printf "unknown")"
+    printf "mime: %s\n" "${_mime}"
+
+    _mime_ok() {
+      case "$1" in
+        text/*|image/*|audio/*|video/*) return 0 ;;
+        application/pdf|application/json|application/xml|\
+        application/javascript|application/zip|application/gzip|\
+        application/x-tar|application/x-bzip2|application/x-xz|\
+        application/x-7z-compressed|application/epub*|\
+        application/vnd.*) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+
+    if ! _mime_ok "${_mime}"; then
+      if ! zenity --question \
+          --title="Send to nb — unusual file type" \
+          --text="<b>${_basename}</b>\n\nDetected type: <tt>${_mime}</tt>\n\nThis file may not display well in a notebook.\nSend anyway?" \
+          --ok-label="Send anyway" \
+          --cancel-label="Cancel" \
+          --width=420 2>/dev/null; then
+        printf "cancelled: binary guard\n"
+        exit 0
+      fi
+      printf "proceeding despite unusual mime type\n"
+    fi
+
+    # ── Step 1: Notebook ────────────────────────────────────────────────────
+    local _nb_names=()
+    mapfile -t _nb_names < <(
+      find "${_nb_dir}" -maxdepth 1 -mindepth 1 -type d ! -name '.*' 2>/dev/null \
+        | xargs -I{} basename {} | sort
+    )
+
+    printf "notebooks: %s\n" "${_nb_names[*]}"
+
+    local _notebook
+    if ! _notebook=$(zenity --list \
+        --title="Send to nb  (1/2)" \
+        --text="Sending: <b>${_basename}</b>\n\nChoose a notebook:" \
+        --column="Notebook" \
+        "${_nb_names[@]}" \
+        --height=380 --width=380 2>/dev/null); then
+      printf "cancelled at notebook picker\n"
+      exit 0
+    fi
+
+    [[ -z "${_notebook}" ]] && { printf "no notebook selected\n"; exit 0; }
+    printf "notebook: %s\n" "${_notebook}"
+
+    # ── Step 2: Folder + filename ───────────────────────────────────────────
+    local _subfolders=()
+    mapfile -t _subfolders < <(
+      find "${_nb_dir}/${_notebook}" -mindepth 1 -maxdepth 2 \
+        -type d ! -name '.*' ! -path '*/.git*' 2>/dev/null \
+        | sed "s|${_nb_dir}/${_notebook}/||" \
+        | sort || true
+    )
+
+    local _folder_values="(root)"
+    local _sub; for _sub in "${_subfolders[@]}"; do
+      _folder_values+="|${_sub}"
+    done
+    printf "folder values: %s\n" "${_folder_values}"
+
+    local _ext_hint="${_ext:+  · ${_ext} appended automatically}"
+
+    local _result
+    if ! _result=$(zenity --forms \
+        --title="Send to nb  (2/2)" \
+        --text="Notebook: <b>${_notebook}</b>    File: <b>${_basename}</b>\n\nLeave Filename blank to keep original." \
+        --add-combo="Folder" --combo-values="${_folder_values}" \
+        --add-entry="Filename (no extension needed${_ext_hint})  default: ${_stem}" \
+        --separator="|" \
+        --width=460 2>/dev/null); then
+      printf "cancelled at details form\n"
+      exit 0
+    fi
+
+    [[ -z "${_result}" ]] && { printf "empty result\n"; exit 0; }
+    printf "raw result: %s\n" "${_result}"
+
+    local _folder_raw _filename_in
+    _folder_raw="$(cut -d'|' -f1 <<< "${_result}")"
+    _filename_in="$(cut -d'|' -f2 <<< "${_result}")"
+
+    printf "folder_raw: %s  filename_in: %s\n" "${_folder_raw}" "${_filename_in}"
+
+    local _folder=""
+    [[ "${_folder_raw}" == "(root)" ]] || _folder="${_folder_raw}"
+    [[ -z "${_filename_in}" ]] && _filename_in="${_stem}"
+
+    # Strip any extension the user typed, then enforce the original.
+    [[ -n "${_ext}" && "${_filename_in}" == *.* ]] && _filename_in="${_filename_in%.*}"
+    _filename_in="${_filename_in}${_ext}"
+
+    printf "resolved — folder: %s  filename: %s\n" \
+      "${_folder:-(root)}" "${_filename_in}"
+
+    # ── Import via nb ───────────────────────────────────────────────────────
+    # nb import copy handles the file copy, .index entry, and git commit.
+    local _selector="${_notebook}:${_folder:+${_folder}/}${_filename_in}"
+    printf "selector: %s\n" "${_selector}"
+
+    local _nb_bin; _nb_bin="$(command -v nb 2>/dev/null || printf "%s/.local/bin/nb" "${HOME}")"
+    if ! "${_nb_bin}" import copy "${_file}" "${_selector}" 2>&1; then
+      zenity --error --title="Send to nb" \
+        --text="Import failed. Check /tmp/nb-send.log for details." \
+        --width=360 2>/dev/null || true
+      exit 1
+    fi
+    printf "import done\n"
+
+    # ── Done ────────────────────────────────────────────────────────────────
+    zenity --info \
+      --title="Send to nb" \
+      --text="✓ <b>${_filename_in}</b>\nsent to <b>${_notebook}${_folder:+/${_folder}}</b>" \
+      --width=360 2>/dev/null || true
+
+    printf "done\n"
+  )
+}
+
+_subcommands add "send"
+_alias_subcommand "nb_send" "send"
