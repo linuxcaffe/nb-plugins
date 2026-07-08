@@ -717,6 +717,22 @@ _cal() {
       oct|Oct|OCT|october|October)   target_month="10" ;;
       nov|Nov|NOV|november|November) target_month="11" ;;
       dec|Dec|DEC|december|December) target_month="12" ;;
+      # Bare unrecognised string → treat as grep term (same as: g <term>)
+      *)
+        mode="grep"
+        grep_args+=("$arg")
+        (( i++ )) || true
+        while [[ $i -lt ${#args[@]} ]]; do
+          local ga="${args[$i]}"
+          if [[ "$ga" == *: ]]; then
+            notebook="${ga%:}"
+          else
+            grep_args+=("$ga")
+          fi
+          (( i++ )) || true
+        done
+        break
+        ;;
     esac
     (( i++ )) || true
   done
