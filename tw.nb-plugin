@@ -39,7 +39,8 @@ _subcommands add "tw"
 
 _subcommands describe "tw" <<HEREDOC
 $(_color_primary "Usage"):
-  ${_ME} tw note <id|uuid> [--notebook <name>] [--series|--each] [--porcelain]
+  ${_ME} tw note <id|uuid> [--notebook <name>] [--series|--each] [--find]
+               [--porcelain]
   ${_ME} tw add <description> [<attribute>...] [--notebook <name>] [--series|--each]
                [--porcelain]
   ${_ME} tw link <selector> <id|uuid> [--porcelain]
@@ -53,6 +54,7 @@ $(_color_primary "Description"):
   note   Open the task's note: the one its nb: annotation names, else one whose
          frontmatter names the task, else a new one (type: task) in tasknotes: (or
          --notebook, or the project's tw.notebook.<project> setting).
+         --find only looks: no new note, no annotation; exit 1 if none.
   add    Add a task (description first, then attributes such as project:x
          due:fri +tag) and create its note.
   link   Make an existing note this task's note. The note keeps its name, type
@@ -732,13 +734,32 @@ def take_flag(args, name):
     return False
 
 
+def lookup_note(t):
+    """The task's existing note (or series note / folder), never creating or annotating."""
+    tpl_uuid = template_uuid(t)
+    if tpl_uuid:
+        mode, target = series_of(t, tpl_uuid)
+        if mode == 'each' and t['uuid'] != tpl_uuid:
+            return occurrence_note(t, target)
+        return target
+    return find_note(t)[0]
+
+
 def cmd_note(args, porcelain):
     notebook = take_option(args, '--notebook')
     each = take_flag(args, '--each')
+    find_only = take_flag(args, '--find')
     take_flag(args, '--series')                 # the default
     if len(args) != 1:
-        die('usage: nb tw note <id|uuid> [--notebook <name>] [--series|--each]')
+        die('usage: nb tw note <id|uuid> [--notebook <name>] [--series|--each] [--find]')
     t = get_task(args[0])
+    if find_only:
+        path = lookup_note(t)
+        if path is None:
+            print(f'nb tw: no note for task {args[0]}', file=sys.stderr)
+            sys.exit(1)
+        report(porcelain, t, path, False)
+        return
     path, created = ensure_note(t, notebook, each)
     report(porcelain, t, path, created)
 

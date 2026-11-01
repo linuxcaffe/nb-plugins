@@ -310,3 +310,14 @@ def test_a_note_that_names_the_task_beats_an_earlier_archive_link(env):
     real.write_text(f'---\ntype: task\ntw: {uuid}\n---\n# mine\n')
     env.task(uuid, 'annotate', '--', f'nb: tasknotes:{real.name}')
     assert env.porcelain('note', uuid)['path'] == str(real)
+
+
+def test_find_never_creates(env):
+    uuid = env.add_task('--', 'Only looking')
+    r = env.nb('tw', 'note', uuid, '--find', '--porcelain', check=False)
+    assert r.returncode == 1
+    assert not list((env.nb_dir / 'tasknotes').rglob('*.note.md'))
+    assert env.annotations(uuid) == []
+    made = env.porcelain('note', uuid)
+    found = env.porcelain('note', uuid, '--find')
+    assert found['path'] == made['path'] and found['created'] == 'no'
