@@ -250,3 +250,52 @@ def test_add_refuses_words_that_are_not_attributes(env, word):
     assert r.returncode != 0
     assert 'not an attribute' in r.stderr
     assert env.task('count', check=False).stdout.strip() == '0'
+
+
+# ── backwards compatibility: annn, tw2nb, the old `nb info` ─────────────────
+
+def test_annn_note_without_frontmatter_is_found_not_duplicated(env):
+    """annn writes <slug>-<uuid8>.note.md with no frontmatter; it is the task's note."""
+    uuid = env.add_task('--', 'Old annn note')
+    old = env.nb_dir / 'tw' / f'old-annn-note-{uuid[:8]}.note.md'
+    old.write_text('just text, as annn writes it\n')
+    p = env.porcelain('note', uuid)
+    assert p['created'] == 'no'
+    assert p['path'] == str(old)
+    assert len(list((env.nb_dir / 'tw').rglob('*.note.md'))) == 1
+
+
+def _tw2nb_archive(env, uuid):
+    """A tw2nb-style archive note in tasks:, linked by tw2nb's numeric breadcrumb."""
+    tasks = env.notebook('tasks')
+    env.nb('tasks:add', '--filename', 'archived.todo.md',
+           '--content', f'# [x] Archived thing\n\n`{uuid[:8]}`\n')
+    nid = env.nb('tasks:list', '--no-color').stdout.split(']')[0].split(':')[-1]
+    return tasks / 'archived.todo.md', f'tasks:{nid}'
+
+
+def test_tw2nb_numeric_annotation_is_honoured(env):
+    uuid = env.add_task('--', 'Archived thing')
+    path, sel = _tw2nb_archive(env, uuid)
+    env.task(uuid, 'annotate', '--', f'nb: {sel}')
+    p = env.porcelain('note', uuid)
+    assert p['created'] == 'no'
+    assert p['path'] == str(path)
+    assert sum(a.startswith('nb: ') for a in env.annotations(uuid)) == 1
+
+
+def test_info_numeric_selector_like_old_plugin(env):
+    uuid = env.add_task('--', 'Archived thing')
+    _, sel = _tw2nb_archive(env, uuid)
+    out = env.nb('info', sel).stdout
+    assert 'Archived thing' in out
+
+
+def test_info_bare_selector_uses_current_notebook_like_nb(env):
+    """Bare means tw: only inside nb: annotations; on the command line it's nb's own rule."""
+    uuid = env.add_task('--', 'In home')
+    (env.nb_dir / 'home' / 'same.md').write_text(f'`{uuid[:8]}`\n')
+    (env.nb_dir / 'tw' / 'same.md').write_text('no uuid here\n')
+    env.nb('use', 'home')
+    out = env.nb('info', 'same.md', check=False)
+    assert 'In home' in out.stdout, out.stderr

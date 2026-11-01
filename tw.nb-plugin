@@ -167,32 +167,46 @@ def is_notebook(name):
     return bool(name) and not name.startswith('.') and (NB_DIR / name / '.git').exists()
 
 
-def split_selector(sel):
-    """'nb:rel/path.md' -> (nb, 'rel/path.md'); a bare path means tw: (or tw.notebook)."""
+def selector_path(sel, bare_notebook):
+    """Lexically confined path for a path selector, or None (no '..', no absolute paths).
+    A selector without a notebook belongs to bare_notebook (None: no answer)."""
     nb, sep, rel = sel.partition(':')
-    if sep and is_notebook(nb):
-        return nb, rel
-    return default_notebook(), sel
-
-
-def selector_path(sel):
-    """Lexically confined path for a path selector, or None (no '..', no absolute paths)."""
-    nb, rel = split_selector(sel)
+    if not (sep and is_notebook(nb)):
+        if not bare_notebook:
+            return None
+        nb, rel = bare_notebook, sel
     if not rel or rel.startswith('/') or '..' in Path(rel).parts:
         return None
     return NB_DIR / nb / rel
 
 
-def resolve_selector(sel):
-    """Path for any selector: a path directly, else ask nb (ids, titles)."""
-    p = selector_path(sel)
-    if p and p.is_file():
-        return p
+def nb_show_path(sel):
+    """Ask nb, as `nb show <sel> --path` would answer on the command line (ids, titles,
+    the current notebook for a bare selector)."""
     r = subprocess.run([NB_BIN, 'show', sel, '--path'], capture_output=True, text=True,
                        stdin=subprocess.DEVNULL)
     out = ANSI_RE.sub('', r.stdout).strip()
     if r.returncode == 0 and out and Path(out).is_file():
         return Path(out)
+    return None
+
+
+def resolve_selector(sel):
+    """A command-line selector: a notebook path directly, else nb's own resolution."""
+    p = selector_path(sel, None)
+    if p and p.is_file():
+        return p
+    return nb_show_path(sel)
+
+
+def resolve_annotation(sel):
+    """An `nb:` annotation value: a bare path means tw: (the default notebook); anything
+    that isn't a path (tw2nb's `tasks:45`) is resolved by nb."""
+    p = selector_path(sel, default_notebook())
+    if p and p.is_file():
+        return p
+    if ':' in sel and is_notebook(sel.partition(':')[0]):
+        return nb_show_path(sel)
     return None
 
 
@@ -322,7 +336,8 @@ def find_by_uuid(uuid):
                 if name.startswith('.') or not name.endswith('.md'):
                     continue
                 p = Path(dirpath) / name
-                if contains_uuid(p, uuid):
+                # annn's <slug>-<uuid8>.note.md has no frontmatter until migrated
+                if name.endswith(f'-{uuid[:8]}.note.md') or contains_uuid(p, uuid):
                     return p
     return None
 
@@ -391,8 +406,8 @@ def note_annotations(t):
 def find_note(t):
     """(path, from_annotation) for the task's existing note, or (None, False)."""
     for sel in note_annotations(t):
-        p = selector_path(sel)
-        if p and p.is_file():
+        p = resolve_annotation(sel)
+        if p:
             return p, True
     p = find_by_uuid(t['uuid'])
     return (p, False) if p else (None, False)
@@ -472,7 +487,7 @@ def cmd_link(args, porcelain):
         path.write_text('---\n' + '\n'.join(new_lines) + '\n---\n' + body)
         commit(path)
     sel = selector_for(path)
-    if sel not in note_annotations(t):
+    if not any(resolve_annotation(a) == path for a in note_annotations(t)):
         annotate(t['uuid'], f'nb: {sel}')
     report(porcelain, t, path, False)
 
