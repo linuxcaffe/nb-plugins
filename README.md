@@ -252,6 +252,9 @@ nb tw status 42                                 # after task 42 done/delete/modi
 nb tw note 42 --porcelain                       # uuid/selector/path/created, for scripts
 ```
 
+`nb tw` on its own lists the `tw` notebook (nb sees the notebook name first); every command
+takes a verb. `nb help tw` shows nothing, as for any nb plugin: this README is the help.
+
 `nb tw add` takes the description first, then attributes only (`name:value`, `+tag`, `-tag`):
 never a command word and never an `rc.` override.
 
