@@ -211,7 +211,18 @@ frontmatter (a list when one note serves several tasks).
 - New notes are `<slug>-<uuid8>.note.md` with `type: task`, in the `tw` notebook, filed in a
   folder per project (`project:kitchen.reno` → `tw:kitchen/`).
 - `nb tw link` makes any existing note a task's note, without renaming it or changing its type.
+- `nb tw status 42` writes the task's status into its note (`tw_status`, and `tw_end` once it's
+  completed or deleted); reopening reverses it. Meant for hooks: it follows annotations only and
+  never scans. A note serving several tasks gets no single status.
 - `nb tw info` shows `task info` for every task a note is about (also the uuid8s tw2nb writes).
+- Locks are respected the way nb-web does: a `.nb-lock` in the folder chain or a note's own
+  `lock: yes` means nothing is written there.
+
+**Recurring tasks** (native `recur:` or [recurrence-overhaul](https://github.com/linuxcaffe/tw-recurrence_overhaul-hook)'s
+`r:`): one note for the whole series (the default), or `--each`, a folder holding one note per
+occurrence. The choice is the template's own `nb:` annotation (a note, or a folder ending in `/`),
+which every occurrence inherits. When an occurrence of a series is done or deleted,
+`nb tw status` adds `- 2026-11-01 ✓ done (1a2b3c4d)` under the note's `## Occurrences`.
 
 Notes are written directly and committed with nb's own `index reconcile --commit`. Each run takes
 the same lock nb-web uses for nb (`$NB_DIR/.logs/nb-web-nb.lock`); a caller that already holds it
@@ -235,6 +246,9 @@ nb tw note 42 --notebook cine                   # create it in cine: instead
 nb tw add "Grout the backsplash" project:kitchen due:fri +reno
 nb tw link cine:edl-definition.md 42            # an existing note becomes task 42's note
 nb tw info tw:kitchen/grout-the-backsplash-1a2b3c4d.note.md
+nb tw add "Water the plants" recur:weekly due:sat            # one note for the series
+nb tw add "Stretch" recur:daily due:today --each              # a note per occurrence
+nb tw status 42                                 # after task 42 done/delete/modify
 nb tw note 42 --porcelain                       # uuid/selector/path/created, for scripts
 ```
 

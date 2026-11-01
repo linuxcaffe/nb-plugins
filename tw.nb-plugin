@@ -6,7 +6,12 @@
 #   nb tw note <id|uuid>          find or create the task's note
 #   nb tw add  <description> [attrs…]   add a task and its note
 #   nb tw link <selector> <id|uuid>     make an existing note a task's note
+#   nb tw status <id|uuid>        mirror the task's status into its note (for hooks)
 #   nb tw info <selector>         Taskwarrior info for the task(s) a note is about
+#
+# Recurring tasks get one note for the series (default) or one per occurrence (--each, a
+# folder). The choice is the template's own nb: annotation (a note, or a folder ending in /),
+# which every occurrence inherits.
 #
 # The link: the task carries `nb: <notebook>:<path>` (authoritative); the note carries
 # `tw: <uuid>` in its frontmatter (a list when it serves several tasks). New notes are
@@ -34,9 +39,11 @@ _subcommands add "tw"
 
 _subcommands describe "tw" <<HEREDOC
 $(_color_primary "Usage"):
-  ${_ME} tw note <id|uuid> [--notebook <name>] [--porcelain]
-  ${_ME} tw add <description> [<attribute>...] [--notebook <name>] [--porcelain]
+  ${_ME} tw note <id|uuid> [--notebook <name>] [--series|--each] [--porcelain]
+  ${_ME} tw add <description> [<attribute>...] [--notebook <name>] [--series|--each]
+               [--porcelain]
   ${_ME} tw link <selector> <id|uuid> [--porcelain]
+  ${_ME} tw status <id|uuid>
   ${_ME} tw info <selector>
 
 $(_color_primary "Description"):
@@ -50,7 +57,14 @@ $(_color_primary "Description"):
          due:fri +tag) and create its note.
   link   Make an existing note this task's note. The note keeps its name, type
          and body; only its frontmatter gains tw:.
+  status Write the task's status (tw_status, tw_end) into its note; for a
+         series note, log the occurrence under '## Occurrences'. Reopening
+         reverses it. Locked notes and notes serving several tasks are skipped.
   info   Show 'task info' for every task a note is about.
+
+  Recurring tasks: one note for the series (default), or --each: a folder
+  with one note per occurrence. The template's nb: annotation records the
+  choice, and occurrences inherit it.
 
   --porcelain  print key: value lines (uuid, selector, path, created) for scripts.
 
@@ -370,12 +384,48 @@ def note_body(t, nb):
     return f'# {t.get("description", "")}\n'
 
 
+# ── locks (nb-web invariant 76: the same rule as _lock_reason) ────────────────
+
+def lock_reason(path):
+    """Why path (a note, or a folder to write into) is locked, or None: a .nb-lock in its
+    folder chain up to the notebook root, or the note's own `lock: yes|on|true|1`."""
+    p = path if path.is_dir() or not path.exists() else path.parent
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        root = NB_DIR / p.relative_to(NB_DIR).parts[0]
+    except (ValueError, IndexError):
+        return None
+    cur = p
+    while True:
+        if (cur / '.nb-lock').exists():
+            return f'{cur.name} is locked'
+        if cur == root or cur == cur.parent:
+            break
+        cur = cur.parent
+    if path.is_file():
+        lines, _ = split_frontmatter(path.read_text(errors='replace'))
+        for line in lines or []:
+            m = re.match(r'^lock:\s*(.*)$', line)
+            if m and re.match(r'^(yes|on|true|1)$', m.group(1).strip().strip('\'"'), re.I):
+                return 'this note is locked (lock: yes)'
+    return None
+
+
+def refuse_if_locked(path):
+    why = lock_reason(path)
+    if why:
+        die(f'{selector_for(path) if path.exists() else path}: {why} -- unlock it first')
+
+
 # ── writing ───────────────────────────────────────────────────────────────────
 
 def commit(path):
-    """Index the note's folder (and any new ancestors) and commit, nb's own way."""
-    r = subprocess.run([NB_BIN, 'index', 'reconcile', str(path.parent), '--ancestors', '--commit'],
-                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    """Index a note's folder (or a new folder itself, and any new ancestors) and commit,
+    nb's own way; then commit anything nb left (it may not, depending on its version)."""
+    folder = path if path.is_dir() else path.parent
+    subprocess.run([NB_BIN, 'index', 'reconcile', str(folder), '--ancestors', '--commit'],
+                   capture_output=True, text=True, stdin=subprocess.DEVNULL)
     nb_root = NB_DIR / path.relative_to(NB_DIR).parts[0]
     status = subprocess.run(['git', '-C', str(nb_root), 'status', '--porcelain'],
                             capture_output=True, text=True).stdout
@@ -385,17 +435,56 @@ def commit(path):
                         f'[nb tw] {path.relative_to(nb_root)}'], capture_output=True)
 
 
-def create_note(t, nb):
+def write_note(path, lines, body):
+    path.write_text('---\n' + '\n'.join(lines) + '\n---\n' + body)
+    commit(path)
+
+
+def note_filename(t):
+    return f'{slug(t.get("description") or "task") or "task"}-{t["uuid"][:8]}'
+
+
+def create_note(t, nb, folder=None, extra=()):
+    """A new tasknote: in `folder` (a Path) if given, else nb's root or project folder."""
+    if folder is None:
+        if not is_notebook(nb):
+            die(f'no notebook {nb}')
+        folder = NB_DIR / nb / folder_for(t, nb)
+    path = folder / f'{note_filename(t)}.note.md'
+    refuse_if_locked(path)
+    folder.mkdir(parents=True, exist_ok=True)
+    nb = path.relative_to(NB_DIR).parts[0]
+    fm = ['type: task', f'tw: {t["uuid"]}', *extra, f'tw_status: {effective_status(t)}',
+          f'title: {yaml_str(t.get("description", ""))}']
+    write_note(path, fm, note_body(t, nb))
+    return path
+
+
+def create_series_folder(tpl, nb):
     if not is_notebook(nb):
         die(f'no notebook {nb}')
-    folder = folder_for(t, nb)
-    path = NB_DIR / nb / folder / f'{slug(t.get("description") or "task") or "task"}-{t["uuid"][:8]}.note.md'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fm = ['type: task', f'tw: {t["uuid"]}', f'tw_status: {t.get("status", "pending")}',
-          f'title: {yaml_str(t.get("description", ""))}']
-    path.write_text('---\n' + '\n'.join(fm) + '\n---\n' + note_body(t, nb))
-    commit(path)
-    return path
+    folder = NB_DIR / nb / folder_for(tpl, nb) / note_filename(tpl)
+    refuse_if_locked(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    commit(folder)
+    return folder
+
+
+def set_keys(lines, updates, removes=()):
+    """Frontmatter lines with scalar keys set (in place, else appended) and others removed."""
+    out, seen = [], set()
+    for line in lines:
+        m = re.match(r'^([A-Za-z0-9_-]+):', line)
+        key = m.group(1) if m else None
+        if key in removes:
+            continue
+        if key in updates:
+            out.append(f'{key}: {updates[key]}')
+            seen.add(key)
+            continue
+        out.append(line)
+    out += [f'{k}: {v}' for k, v in updates.items() if k not in seen]
+    return out
 
 
 def note_annotations(t):
@@ -403,25 +492,140 @@ def note_annotations(t):
             if a.get('description', '').startswith('nb: ')]
 
 
+def annotation_target(sel):
+    """What an nb: annotation points at: a folder (trailing '/'), a note, or None."""
+    if sel.endswith('/'):
+        d = selector_path(sel.rstrip('/'), default_notebook())
+        return d if d and d.is_dir() else None
+    return resolve_annotation(sel)
+
+
+def link_to(uuid, target):
+    """Annotate the task with nb: <target> unless one of its annotations already points there."""
+    t = get_task(uuid)
+    if any(annotation_target(a) == target for a in note_annotations(t)):
+        return
+    sel = selector_for(target) + ('/' if target.is_dir() else '')
+    annotate(uuid, f'nb: {sel}')
+
+
 def find_note(t):
     """(path, from_annotation) for the task's existing note, or (None, False)."""
     for sel in note_annotations(t):
-        p = resolve_annotation(sel)
-        if p:
+        p = annotation_target(sel)
+        if p and p.is_file():
             return p, True
     p = find_by_uuid(t['uuid'])
     return (p, False) if p else (None, False)
 
 
 def report(porcelain, t, path, created):
-    sel = selector_for(path)
+    sel = selector_for(path) + ('/' if path.is_dir() else '')
     if porcelain:
         print(f'uuid: {t["uuid"]}\nselector: {sel}\npath: {path}\ncreated: {"yes" if created else "no"}')
     else:
         print(f'{"Created" if created else "Note"}: {sel}')
 
 
-def ensure_note(t, notebook=None):
+# ── recurring ─────────────────────────────────────────────────────────────────
+
+def template_uuid(t):
+    """The recurrence template's uuid: an occurrence's parent: (native) or rtemplate
+    (recurrence-overhaul), the task itself when it is a template, else None."""
+    tp = t.get('parent') or t.get('rtemplate')
+    if tp:
+        return tp
+    if t.get('status') == 'recurring' or t.get('recur') or t.get('r'):
+        return t['uuid']
+    return None
+
+
+def occurrences(tpl_uuid):
+    r = task('rc.json.array=on', '(', '+PENDING', 'or', '+WAITING', ')', 'export', check=False)
+    try:
+        tasks = json.loads(r.stdout or '[]')
+    except json.JSONDecodeError:
+        return []
+    return [x for x in tasks
+            if x['uuid'] != tpl_uuid and (x.get('parent') or x.get('rtemplate')) == tpl_uuid]
+
+
+def recur_mode(t, tpl_uuid):
+    """('each', folder) | ('series', note) | (None, None), from t's nb: annotations."""
+    targets = [annotation_target(a) for a in note_annotations(t)]
+    for p in targets:
+        if p and p.is_dir():
+            return 'each', p
+    for p in targets:
+        if p and p.is_file() and tpl_uuid in fm_uuids(
+                split_frontmatter(p.read_text(errors='replace'))[0]):
+            return 'series', p
+    return None, None
+
+
+def find_series_folder(tpl_uuid):
+    root = NB_DIR / default_notebook()
+    for dirpath, dirnames, _ in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+        for d in dirnames:
+            if d.endswith(f'-{tpl_uuid[:8]}'):
+                return Path(dirpath) / d
+    return None
+
+
+def series_of(t, tpl_uuid, tpl=None):
+    """(mode, target) for a recurring task: the template's choice, else the occurrence's
+    inherited link, else one found on disk."""
+    tpl = tpl or (t if t['uuid'] == tpl_uuid else get_task(tpl_uuid))
+    mode, target = recur_mode(tpl, tpl_uuid)
+    if not mode:
+        mode, target = recur_mode(t, tpl_uuid)
+    if not mode:
+        found = find_series_folder(tpl_uuid) or find_by_uuid(tpl_uuid)
+        if found:
+            mode, target = ('each' if found.is_dir() else 'series'), found
+    return mode, target
+
+
+def occurrence_note(t, folder):
+    """An each-mode occurrence's own note, if it has one."""
+    for a in note_annotations(t):
+        p = annotation_target(a)
+        if p and p.is_file():
+            return p
+    for p in folder.glob('*.note.md'):
+        if p.name.endswith(f'-{t["uuid"][:8]}.note.md') or contains_uuid(p, t['uuid']):
+            return p
+    return None
+
+
+def ensure_recurring(t, tpl_uuid, notebook, each):
+    tpl = t if t['uuid'] == tpl_uuid else get_task(tpl_uuid)
+    mode, target = series_of(t, tpl_uuid, tpl)
+    created = False
+    if not mode:
+        nb = notebook_for(tpl, notebook)
+        if each:
+            mode, target = 'each', create_series_folder(tpl, nb)
+        else:
+            mode, target = 'series', create_note(tpl, nb, extra=['tw_recur: series'])
+            created = True
+    for u in [tpl_uuid] + [o['uuid'] for o in occurrences(tpl_uuid)]:
+        link_to(u, target)
+    if mode == 'series' or t['uuid'] == tpl_uuid:
+        return target, created
+    own = occurrence_note(t, target)
+    if own is None:
+        own = create_note(t, None, folder=target, extra=[f'tw_template: {tpl_uuid}'])
+        created = True
+    link_to(t['uuid'], own)
+    return own, created
+
+
+def ensure_note(t, notebook=None, each=False):
+    tpl_uuid = template_uuid(t)
+    if tpl_uuid:
+        return ensure_recurring(t, tpl_uuid, notebook, each)
     path, from_ann = find_note(t)
     created = False
     if path is None:
@@ -430,6 +634,78 @@ def ensure_note(t, notebook=None):
     if not from_ann:
         annotate(t['uuid'], f'nb: {selector_for(path)}')
     return path, created
+
+
+# ── status mirroring ─────────────────────────────────────────────────────────
+
+def end_date(t):
+    from datetime import datetime, timezone
+    end = t.get('end')
+    if not end:
+        return date.today().isoformat()
+    utc = datetime.strptime(end, '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+    return utc.astimezone().date().isoformat()          # local, like nb-web's isoDate
+
+
+def effective_status(t):
+    """Taskwarrior 2.6 stores a waiting task as pending with a future wait: (+WAITING is
+    virtual); the note says waiting."""
+    from datetime import datetime, timezone
+    status = t.get('status', 'pending')
+    if status == 'pending' and t.get('wait'):
+        wait = datetime.strptime(t['wait'], '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+        if wait > datetime.now(timezone.utc):
+            return 'waiting'
+    return status
+
+
+def mirror(path, t):
+    """Write t's status into the note, if the note is this task's alone and not locked."""
+    lines, body = split_frontmatter(path.read_text(errors='replace'))
+    if lines is None or fm_uuids(lines) != [t['uuid']]:
+        return                    # annn's plain notes, notes serving several tasks
+    why = lock_reason(path)
+    if why:
+        print(f'skipped {selector_for(path)}: {why}')
+        return
+    status = effective_status(t)
+    if status in ('completed', 'deleted'):
+        new = set_keys(lines, {'tw_status': status, 'tw_end': end_date(t)})
+    else:
+        new = set_keys(lines, {'tw_status': status}, removes=('tw_end',))
+    if new != lines:
+        write_note(path, new, body)
+
+
+def log_occurrence(path, occ):
+    """A series note's `## Occurrences` line for a finished occurrence (removed on reopen)."""
+    why = lock_reason(path)
+    if why:
+        print(f'skipped {selector_for(path)}: {why}')
+        return
+    text = path.read_text(errors='replace')
+    tag = f'({occ["uuid"][:8]})'
+    kept = [ln for ln in text.split('\n') if not (ln.startswith('- ') and ln.endswith(tag))]
+    status = occ.get('status')
+    line = {'completed': f'- {end_date(occ)} ✓ done {tag}',
+            'deleted': f'- {end_date(occ)} ✗ deleted {tag}'}.get(status)
+    if line:
+        if '## Occurrences' not in kept:
+            while kept and kept[-1] == '':
+                kept.pop()
+            kept += ['', '## Occurrences', '']
+        i = kept.index('## Occurrences') + 1
+        while i < len(kept) and not kept[i].startswith('#'):
+            i += 1
+        while i > 0 and kept[i - 1] == '':
+            i -= 1
+        kept.insert(i, line)
+    new = '\n'.join(kept)
+    if not new.endswith('\n'):
+        new += '\n'
+    if new != text:
+        path.write_text(new)
+        commit(path)
 
 
 # ── commands ──────────────────────────────────────────────────────────────────
@@ -445,19 +721,30 @@ def take_option(args, name):
     return None
 
 
+def take_flag(args, name):
+    if name in args:
+        args.remove(name)
+        return True
+    return False
+
+
 def cmd_note(args, porcelain):
     notebook = take_option(args, '--notebook')
+    each = take_flag(args, '--each')
+    take_flag(args, '--series')                 # the default
     if len(args) != 1:
-        die('usage: nb tw note <id|uuid> [--notebook <name>]')
+        die('usage: nb tw note <id|uuid> [--notebook <name>] [--series|--each]')
     t = get_task(args[0])
-    path, created = ensure_note(t, notebook)
+    path, created = ensure_note(t, notebook, each)
     report(porcelain, t, path, created)
 
 
 def cmd_add(args, porcelain):
     notebook = take_option(args, '--notebook')
+    each = take_flag(args, '--each')
+    take_flag(args, '--series')
     if not args:
-        die('usage: nb tw add <description> [<attribute>...]')
+        die('usage: nb tw add <description> [<attribute>...] [--series|--each]')
     desc, attrs = args[0], args[1:]
     for a in attrs:   # attributes only: name:value, +tag, -tag (no words that could be commands)
         # never an rc override (rc.name:value), never a command word (nb-web invariant 82)
@@ -469,7 +756,7 @@ def cmd_add(args, porcelain):
     if not m:
         die(f'task add printed no uuid: {r.stdout.strip()}')
     t = get_task(m.group(1))
-    path, created = ensure_note(t, notebook)
+    path, created = ensure_note(t, notebook, each)
     report(porcelain, t, path, created)
 
 
@@ -480,16 +767,39 @@ def cmd_link(args, porcelain):
     if not path:
         die(f'no note {args[0]}')
     t = get_task(args[1])
-    text = path.read_text()
-    lines, body = split_frontmatter(text)
+    lines, body = split_frontmatter(path.read_text())
     new_lines = with_uuid(lines or [], t['uuid'])
     if new_lines != lines:
-        path.write_text('---\n' + '\n'.join(new_lines) + '\n---\n' + body)
-        commit(path)
-    sel = selector_for(path)
-    if not any(resolve_annotation(a) == path for a in note_annotations(t)):
-        annotate(t['uuid'], f'nb: {sel}')
+        refuse_if_locked(path)
+        write_note(path, new_lines, body)
+    link_to(t['uuid'], path)
     report(porcelain, t, path, False)
+
+
+def cmd_status(args, porcelain):
+    """Mirror a task's status into its note(s). Quiet and annotation-only (no disk scan):
+    hooks call it on every status change."""
+    if len(args) != 1:
+        die('usage: nb tw status <id|uuid>')
+    t = get_task(args[0])
+    tpl_uuid = template_uuid(t)
+    if tpl_uuid and tpl_uuid != t['uuid']:      # an occurrence
+        targets = [annotation_target(a) for a in note_annotations(t)]
+        folder = next((p for p in targets if p and p.is_dir()), None)
+        if folder:
+            own = next((p for p in targets if p and p.is_file()), None)
+            if own:
+                mirror(own, t)
+            return
+        series = next((p for p in targets if p and p.is_file() and tpl_uuid in fm_uuids(
+            split_frontmatter(p.read_text(errors='replace'))[0])), None)
+        if series:
+            log_occurrence(series, t)
+            return
+    for a in note_annotations(t):
+        p = annotation_target(a)
+        if p and p.is_file():
+            mirror(p, t)
 
 
 def cmd_info(args, porcelain):
@@ -520,11 +830,12 @@ def main():
     porcelain = '--porcelain' in args
     args = [a for a in args if a != '--porcelain']
     if not args:
-        die('usage: nb tw (note|add|link|info) …   (nb help tw)')
+        die('usage: nb tw (note|add|link|status|info) …   (nb help tw)')
     cmd, rest = args[0], args[1:]
-    handler = {'note': cmd_note, 'add': cmd_add, 'link': cmd_link, 'info': cmd_info}.get(cmd)
+    handler = {'note': cmd_note, 'add': cmd_add, 'link': cmd_link, 'info': cmd_info,
+               'status': cmd_status}.get(cmd)
     if not handler:
-        die(f'unknown command {cmd} (note, add, link, info)')
+        die(f'unknown command {cmd} (note, add, link, status, info)')
     with nb_lock():
         handler(rest, porcelain)
 
