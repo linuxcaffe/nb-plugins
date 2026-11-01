@@ -15,12 +15,12 @@
 #
 # The link: the task carries `nb: <notebook>:<path>` (authoritative); the note carries
 # `tw: <uuid>` in its frontmatter (a list when it serves several tasks). New notes are
-# `<slug>-<uuid8>.note.md` with `type: task`, in `tw:` unless told otherwise.
+# `<slug>-<uuid8>.note.md` with `type: task`, in `tasknotes:` unless told otherwise.
 #
 # Settings are taskrc entries (rc.*), e.g. in ~/.task/config/tw-nb.rc:
-#   tw.notebook        = tw     default notebook for new notes
+#   tw.notebook        = tasknotes  default notebook for new notes
 #   tw.notebook.<proj> = cine   new notes for project <proj> (or a sub-project) go here
-#   tw.folder_depth    = 1      folders in tw: from the project: 0 none, 1 kitchen/,
+#   tw.folder_depth    = 1      folders in tasknotes: from the project: 0 none, 1 kitchen/,
 #                               2 kitchen/reno/ (never deeper)
 #
 # Templates: <notebook>/.templates/task.md, {{field}} and {{field|default}} filled from the
@@ -51,7 +51,7 @@ $(_color_primary "Description"):
   annotation; the note gets 'tw: <uuid>' in its frontmatter.
 
   note   Open the task's note: the one its nb: annotation names, else one whose
-         frontmatter names the task, else a new one (type: task) in tw: (or
+         frontmatter names the task, else a new one (type: task) in tasknotes: (or
          --notebook, or the project's tw.notebook.<project> setting).
   add    Add a task (description first, then attributes such as project:x
          due:fri +tag) and create its note.
@@ -72,7 +72,7 @@ $(_color_primary "Examples"):
   ${_ME} tw note 42
   ${_ME} tw add "Grout the backsplash" project:kitchen due:fri
   ${_ME} tw link cine:edl-definition.md 42
-  ${_ME} tw info tw:kitchen/grout-the-backsplash-1a2b3c4d.note.md
+  ${_ME} tw info tasknotes:kitchen/grout-the-backsplash-1a2b3c4d.note.md
 HEREDOC
 
 # `nb info` was this plugin's only command in tw2nb; kept as an alias for a release.
@@ -230,7 +230,7 @@ def selector_for(path):
 
 
 def default_notebook():
-    return rc('tw.notebook') or 'tw'
+    return rc('tw.notebook') or 'tasknotes'
 
 
 def notebook_for(t, explicit=None):
@@ -510,11 +510,15 @@ def link_to(uuid, target):
 
 
 def find_note(t):
-    """(path, from_annotation) for the task's existing note, or (None, False)."""
-    for sel in note_annotations(t):
-        p = annotation_target(sel)
-        if p and p.is_file():
+    """(path, from_annotation) for the task's existing note, or (None, False). A note that
+    names the task in its own tw: frontmatter beats one that doesn't (tw2nb's archive link
+    `nb: tasks:N` may come first)."""
+    files = [p for p in (annotation_target(a) for a in note_annotations(t)) if p and p.is_file()]
+    for p in files:
+        if contains_uuid(p, t['uuid']):
             return p, True
+    if files:
+        return files[0], True
     p = find_by_uuid(t['uuid'])
     return (p, False) if p else (None, False)
 

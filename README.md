@@ -208,8 +208,8 @@ frontmatter (a list when one note serves several tasks).
 
 - `nb tw note 42` opens task 42's note: the one its `nb:` annotation names, else a note whose
   frontmatter names the task (and the lost annotation is restored), else a new one.
-- New notes are `<slug>-<uuid8>.note.md` with `type: task`, in the `tw` notebook, filed in a
-  folder per project (`project:kitchen.reno` → `tw:kitchen/`).
+- New notes are `<slug>-<uuid8>.note.md` with `type: task`, in the `tasknotes` notebook, filed in
+  a folder per project (`project:kitchen.reno` → `tasknotes:kitchen/`).
 - `nb tw link` makes any existing note a task's note, without renaming it or changing its type.
 - `nb tw status 42` writes the task's status into its note (`tw_status`, and `tw_end` once it's
   completed or deleted); reopening reverses it. Meant for hooks: it follows annotations only and
@@ -231,7 +231,7 @@ sets `NB_LOCK_HELD=1`.
 ### Install
 
 ```bash
-nb notebooks add tw
+nb notebooks add tasknotes
 nb plugin install https://raw.githubusercontent.com/linuxcaffe/nb-plugins/main/tw.nb-plugin
 ```
 
@@ -245,15 +245,15 @@ nb tw note 42                                   # find or create task 42's note
 nb tw note 42 --notebook cine                   # create it in cine: instead
 nb tw add "Grout the backsplash" project:kitchen due:fri +reno
 nb tw link cine:edl-definition.md 42            # an existing note becomes task 42's note
-nb tw info tw:kitchen/grout-the-backsplash-1a2b3c4d.note.md
+nb tw info tasknotes:kitchen/grout-the-backsplash-1a2b3c4d.note.md
 nb tw add "Water the plants" recur:weekly due:sat            # one note for the series
 nb tw add "Stretch" recur:daily due:today --each              # a note per occurrence
 nb tw status 42                                 # after task 42 done/delete/modify
 nb tw note 42 --porcelain                       # uuid/selector/path/created, for scripts
 ```
 
-`nb tw` on its own lists the `tw` notebook (nb sees the notebook name first); every command
-takes a verb. `nb help tw` shows nothing, as for any nb plugin: this README is the help.
+`nb tw` needs a command (`note`, `add`, `link`, `status`, `info`); if you also have a notebook
+named `tw`, bare `nb tw` lists that notebook instead. `nb help tw` shows nothing, as for any nb plugin: this README is the help.
 
 `nb tw add` takes the description first, then attributes only (`name:value`, `+tag`, `-tag`):
 never a command word and never an `rc.` override.
@@ -263,9 +263,9 @@ never a command word and never an `rc.` override.
 Taskwarrior config entries (put them in your `.taskrc` or an included file):
 
 ```ini
-tw.notebook        = tw     # default notebook for new notes
+tw.notebook        = tasknotes  # default notebook for new notes
 tw.notebook.film   = cine   # new notes for project film (and film.*) go to cine:
-tw.folder_depth    = 1      # 0: no folders, 1: tw:kitchen/, 2: tw:kitchen/reno/
+tw.folder_depth    = 1      # 0: no folders, 1: tasknotes:kitchen/, 2: tasknotes:kitchen/reno/
 ```
 
 ### Templates

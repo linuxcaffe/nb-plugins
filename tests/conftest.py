@@ -88,7 +88,7 @@ def env(tmp_path):
     e.run('git', 'config', '--global', 'user.name', 'Pat Smith')
     e.run('git', 'config', '--global', 'user.email', 'pat@example.com')
     e.nb('notebooks', '--names')          # first run: creates `home` (and prints a splash)
-    e.notebook('tw')
+    e.notebook('tasknotes')
     (e.nb_dir / '.plugins').mkdir(exist_ok=True)
     (e.nb_dir / '.plugins' / 'tw.nb-plugin').symlink_to(REPO / 'tw.nb-plugin')
     return e

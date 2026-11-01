@@ -20,8 +20,8 @@ def test_note_creates_tasknote_with_frontmatter_and_annotation(env):
     uuid = env.add_task('--', 'Fix the billing discrepancy')
     p = env.porcelain('note', uuid)
     assert p['created'] == 'yes'
-    assert p['selector'] == f'tw:fix-the-billing-discrepancy-{uuid[:8]}.note.md'
-    path = env.nb_dir / 'tw' / f'fix-the-billing-discrepancy-{uuid[:8]}.note.md'
+    assert p['selector'] == f'tasknotes:fix-the-billing-discrepancy-{uuid[:8]}.note.md'
+    path = env.nb_dir / 'tasknotes' / f'fix-the-billing-discrepancy-{uuid[:8]}.note.md'
     assert p['path'] == str(path)
     meta = fm(path)
     assert meta['type'] == 'task'
@@ -29,8 +29,8 @@ def test_note_creates_tasknote_with_frontmatter_and_annotation(env):
     assert meta['tw_status'] == 'pending'
     assert meta['title'] == 'Fix the billing discrepancy'
     assert f'nb: {p["selector"]}' in env.annotations(uuid)
-    assert env.git_clean('tw'), 'note is committed'
-    listed = env.nb('tw:list', '--no-color', check=False).stdout
+    assert env.git_clean('tasknotes'), 'note is committed'
+    listed = env.nb('tasknotes:list', '--no-color', check=False).stdout
     assert 'Fix the billing discrepancy' in listed or path.name in listed, 'nb indexed it'
 
 
@@ -57,9 +57,9 @@ def test_project_folders_follow_folder_depth(env, depth, folder):
         env.set_rc('tw.folder_depth', depth)
     uuid = env.add_task('project:kitchen.reno.tiles', '--', 'Grout the backsplash')
     p = env.porcelain('note', uuid)
-    assert p['selector'] == f'tw:{folder}grout-the-backsplash-{uuid[:8]}.note.md'
-    assert (env.nb_dir / 'tw' / folder / f'grout-the-backsplash-{uuid[:8]}.note.md').is_file()
-    assert env.git_clean('tw')
+    assert p['selector'] == f'tasknotes:{folder}grout-the-backsplash-{uuid[:8]}.note.md'
+    assert (env.nb_dir / 'tasknotes' / folder / f'grout-the-backsplash-{uuid[:8]}.note.md').is_file()
+    assert env.git_clean('tasknotes')
 
 
 def test_existing_annotation_wins_even_in_another_notebook(env):
@@ -72,17 +72,17 @@ def test_existing_annotation_wins_even_in_another_notebook(env):
     p = env.porcelain('note', uuid)
     assert p['created'] == 'no'
     assert p['selector'] == 'cine:edl-definition.md'
-    assert not list((env.nb_dir / 'tw').glob('*.note.md'))
+    assert not list((env.nb_dir / 'tasknotes').glob('*.note.md'))
 
 
 def test_bare_annotation_means_tw(env):
     uuid = env.add_task('--', 'Bare link')
     name = f'bare-link-{uuid[:8]}.note.md'
-    (env.nb_dir / 'tw' / name).write_text(f'---\ntype: task\ntw: {uuid}\n---\n')
+    (env.nb_dir / 'tasknotes' / name).write_text(f'---\ntype: task\ntw: {uuid}\n---\n')
     env.task(uuid, 'annotate', '--', f'nb: {name}')
     p = env.porcelain('note', uuid)
     assert p['created'] == 'no'
-    assert p['selector'] == f'tw:{name}'
+    assert p['selector'] == f'tasknotes:{name}'
 
 
 def test_lost_annotation_found_by_uuid_and_restored(env):
@@ -104,12 +104,12 @@ def test_notebook_option_and_project_map(env):
     env.set_rc('tw.notebook.film', 'cine')
     b = env.add_task('project:film.edit', '--', 'Mapped project')
     assert env.porcelain('note', b)['selector'] == f'cine:mapped-project-{b[:8]}.note.md', \
-        'project folders apply to tw: only'
+        'project folders apply to tasknotes: only'
     assert env.git_clean('cine')
 
 
 def test_template_fills_fields(env):
-    tdir = env.nb_dir / 'tw' / '.templates'
+    tdir = env.nb_dir / 'tasknotes' / '.templates'
     tdir.mkdir()
     (tdir / 'task.md').write_text('# {{description}}\n\nproject {{project}}, uuid {{uuid}}\n'
                                   '{{missing|fallback}}\n')
@@ -131,8 +131,8 @@ def test_awkward_description_is_one_argument_and_a_tidy_slug(env):
     desc = '-rf "quoted" $HOME; rm it & café'
     uuid = env.add_task('--', desc)
     p = env.porcelain('note', uuid)
-    assert p['selector'] == f'tw:rf-quoted-home-rm-it-caf-{uuid[:8]}.note.md'
-    assert fm(env.nb_dir / 'tw' / p['selector'][3:])['title'] == desc
+    assert p['selector'] == f'tasknotes:rf-quoted-home-rm-it-caf-{uuid[:8]}.note.md'
+    assert fm(env.nb_dir / 'tasknotes' / p['selector'].split(':', 1)[1])['title'] == desc
 
 
 def test_porcelain_has_no_colour(env):
@@ -155,7 +155,7 @@ def test_add_creates_task_and_note(env):
     assert t['description'] == 'Buy grout'
     assert t['project'] == 'kitchen' and t['priority'] == 'H'
     assert p['created'] == 'yes'
-    assert p['selector'] == f'tw:kitchen/buy-grout-{p["uuid"][:8]}.note.md'
+    assert p['selector'] == f'tasknotes:kitchen/buy-grout-{p["uuid"][:8]}.note.md'
     assert f'nb: {p["selector"]}' in env.annotations(p['uuid'])
 
 
@@ -201,14 +201,14 @@ def test_link_note_without_frontmatter(env):
 def test_info_reads_frontmatter_uuid(env):
     uuid = env.add_task('--', 'Info about me')
     env.porcelain('note', uuid)
-    out = env.nb('tw', 'info', f'tw:info-about-me-{uuid[:8]}.note.md').stdout
+    out = env.nb('tw', 'info', f'tasknotes:info-about-me-{uuid[:8]}.note.md').stdout
     assert 'Info about me' in out and uuid in out
 
 
 def test_bare_info_alias_still_works(env):
     uuid = env.add_task('--', 'Alias check')
     env.porcelain('note', uuid)
-    out = env.nb('info', f'tw:alias-check-{uuid[:8]}.note.md').stdout
+    out = env.nb('info', f'tasknotes:alias-check-{uuid[:8]}.note.md').stdout
     assert 'Alias check' in out
 
 
@@ -257,12 +257,12 @@ def test_add_refuses_words_that_are_not_attributes(env, word):
 def test_annn_note_without_frontmatter_is_found_not_duplicated(env):
     """annn writes <slug>-<uuid8>.note.md with no frontmatter; it is the task's note."""
     uuid = env.add_task('--', 'Old annn note')
-    old = env.nb_dir / 'tw' / f'old-annn-note-{uuid[:8]}.note.md'
+    old = env.nb_dir / 'tasknotes' / f'old-annn-note-{uuid[:8]}.note.md'
     old.write_text('just text, as annn writes it\n')
     p = env.porcelain('note', uuid)
     assert p['created'] == 'no'
     assert p['path'] == str(old)
-    assert len(list((env.nb_dir / 'tw').rglob('*.note.md'))) == 1
+    assert len(list((env.nb_dir / 'tasknotes').rglob('*.note.md'))) == 1
 
 
 def _tw2nb_archive(env, uuid):
@@ -295,7 +295,18 @@ def test_info_bare_selector_uses_current_notebook_like_nb(env):
     """Bare means tw: only inside nb: annotations; on the command line it's nb's own rule."""
     uuid = env.add_task('--', 'In home')
     (env.nb_dir / 'home' / 'same.md').write_text(f'`{uuid[:8]}`\n')
-    (env.nb_dir / 'tw' / 'same.md').write_text('no uuid here\n')
+    (env.nb_dir / 'tasknotes' / 'same.md').write_text('no uuid here\n')
     env.nb('use', 'home')
     out = env.nb('info', 'same.md', check=False)
     assert 'In home' in out.stdout, out.stderr
+
+
+def test_a_note_that_names_the_task_beats_an_earlier_archive_link(env):
+    """tw2nb's `nb: tasks:N` (an archive) may come first; the real tasknote wins."""
+    uuid = env.add_task('--', 'Archived thing')
+    _, sel = _tw2nb_archive(env, uuid)
+    env.task(uuid, 'annotate', '--', f'nb: {sel}')
+    real = env.nb_dir / 'tasknotes' / f'archived-thing-{uuid[:8]}.note.md'
+    real.write_text(f'---\ntype: task\ntw: {uuid}\n---\n# mine\n')
+    env.task(uuid, 'annotate', '--', f'nb: tasknotes:{real.name}')
+    assert env.porcelain('note', uuid)['path'] == str(real)

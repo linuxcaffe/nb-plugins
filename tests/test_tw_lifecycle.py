@@ -29,7 +29,7 @@ def test_done_mirrors_completed_and_end_date(env):
     meta = fm(path)
     assert meta['tw_status'] == 'completed'
     assert str(meta['tw_end']) == date.today().isoformat()
-    assert env.git_clean('tw')
+    assert env.git_clean('tasknotes')
 
 
 def test_reopen_flips_back_and_drops_end(env):
@@ -84,9 +84,9 @@ def test_note_for_several_tasks_gets_no_single_status(env):
 
 def test_annn_note_without_frontmatter_is_left_alone(env):
     uuid = env.add_task('--', 'Plain annn')
-    p = env.nb_dir / 'tw' / f'plain-annn-{uuid[:8]}.note.md'
+    p = env.nb_dir / 'tasknotes' / f'plain-annn-{uuid[:8]}.note.md'
     p.write_text('first line\n')
-    env.task(uuid, 'annotate', '--', f'nb: tw:{p.name}')
+    env.task(uuid, 'annotate', '--', f'nb: tasknotes:{p.name}')
     env.task(uuid, 'done')
     env.nb('tw', 'status', uuid)
     assert p.read_text() == 'first line\n'
@@ -112,11 +112,11 @@ def test_locked_folder_is_skipped(env):
 
 
 def test_no_new_note_in_a_locked_folder(env):
-    (env.nb_dir / 'tw' / '.nb-lock').write_text('')
+    (env.nb_dir / 'tasknotes' / '.nb-lock').write_text('')
     uuid = env.add_task('--', 'Nowhere to go')
     r = env.nb('tw', 'note', uuid, check=False)
     assert r.returncode != 0 and 'locked' in r.stderr
-    assert not list((env.nb_dir / 'tw').rglob('*.note.md'))
+    assert not list((env.nb_dir / 'tasknotes').rglob('*.note.md'))
 
 
 def test_link_refuses_a_locked_note(env):
@@ -144,8 +144,8 @@ def test_series_by_default_one_note_for_all(env, overhaul):
     tpl, (o1, o2) = overhaul
     p = env.porcelain('note', o1)
     assert p['created'] == 'yes'
-    assert p['selector'] == f'tw:garden/water-the-plants-{tpl[:8]}.note.md'
-    meta = fm(env.nb_dir / 'tw' / p['selector'][3:])
+    assert p['selector'] == f'tasknotes:garden/water-the-plants-{tpl[:8]}.note.md'
+    meta = fm(env.nb_dir / 'tasknotes' / p['selector'].split(':', 1)[1])
     assert meta['tw'] == tpl and meta['tw_recur'] == 'series'
     link = f'nb: {p["selector"]}'
     for u in (tpl, o1, o2):
@@ -157,16 +157,16 @@ def test_series_by_default_one_note_for_all(env, overhaul):
 def test_each_makes_a_folder_and_a_note_per_occurrence(env, overhaul):
     tpl, (o1, o2) = overhaul
     p1 = env.porcelain('note', o1, '--each')
-    folder = f'tw:garden/water-the-plants-{tpl[:8]}/'
+    folder = f'tasknotes:garden/water-the-plants-{tpl[:8]}/'
     for u in (tpl, o1, o2):
         assert f'nb: {folder}' in env.annotations(u)
     assert p1['selector'] == f'{folder[:-1]}/water-the-plants-{o1[:8]}.note.md'
-    m1 = fm(env.nb_dir / 'tw' / p1['selector'][3:])
+    m1 = fm(env.nb_dir / 'tasknotes' / p1['selector'].split(':', 1)[1])
     assert m1['tw'] == o1 and m1['tw_template'] == tpl
     assert f'nb: {p1["selector"]}' in env.annotations(o1)
     p2 = env.porcelain('note', o2)          # no flag: the template's choice stands
     assert p2['selector'] == f'{folder[:-1]}/water-the-plants-{o2[:8]}.note.md'
-    assert env.git_clean('tw')
+    assert env.git_clean('tasknotes')
 
 
 def test_template_choice_wins_over_a_later_flag(env, overhaul):
@@ -179,13 +179,13 @@ def test_note_on_each_template_is_the_folder(env, overhaul):
     tpl, (o1, _) = overhaul
     env.porcelain('note', o1, '--each')
     p = env.porcelain('note', tpl)
-    assert p['selector'] == f'tw:garden/water-the-plants-{tpl[:8]}/'
+    assert p['selector'] == f'tasknotes:garden/water-the-plants-{tpl[:8]}/'
     assert p['created'] == 'no'
 
 
 def test_series_occurrence_done_is_logged_not_closed(env, overhaul):
     tpl, (o1, o2) = overhaul
-    path = env.nb_dir / 'tw' / env.porcelain('note', o1)['selector'][3:]
+    path = env.nb_dir / 'tasknotes' / env.porcelain('note', o1)['selector'].split(':', 1)[1]
     env.task(o1, 'done')
     env.nb('tw', 'status', o1)
     env.nb('tw', 'status', o1)              # idempotent
@@ -204,7 +204,7 @@ def test_series_occurrence_done_is_logged_not_closed(env, overhaul):
 
 def test_series_ends_when_template_does(env, overhaul):
     tpl, (o1, _) = overhaul
-    path = env.nb_dir / 'tw' / env.porcelain('note', o1)['selector'][3:]
+    path = env.nb_dir / 'tasknotes' / env.porcelain('note', o1)['selector'].split(':', 1)[1]
     env.task(tpl, 'delete')
     env.nb('tw', 'status', tpl)
     assert fm(path)['tw_status'] == 'deleted'
@@ -212,7 +212,7 @@ def test_series_ends_when_template_does(env, overhaul):
 
 def test_each_occurrence_note_mirrors_its_own_status(env, overhaul):
     tpl, (o1, _) = overhaul
-    path = env.nb_dir / 'tw' / env.porcelain('note', o1, '--each')['selector'][3:]
+    path = env.nb_dir / 'tasknotes' / env.porcelain('note', o1, '--each')['selector'].split(':', 1)[1]
     env.task(o1, 'done')
     env.nb('tw', 'status', o1)
     assert fm(path)['tw_status'] == 'completed'
@@ -224,8 +224,8 @@ def test_native_recurrence_series_and_inheritance(env):
     p = env.porcelain('add', 'Take out the bins', 'recur:weekly', 'due:today')
     t = env.export(p['uuid'])
     assert t['status'] == 'recurring'
-    assert p['selector'] == f'tw:take-out-the-bins-{p["uuid"][:8]}.note.md'
-    assert fm(env.nb_dir / 'tw' / p['selector'][3:])['tw_recur'] == 'series'
+    assert p['selector'] == f'tasknotes:take-out-the-bins-{p["uuid"][:8]}.note.md'
+    assert fm(env.nb_dir / 'tasknotes' / p['selector'].split(':', 1)[1])['tw_recur'] == 'series'
     env.task('list', check=False)           # native recurrence spawns occurrences here
     kids = [x for x in __import__('json').loads(env.task('rc.json.array=on', 'export').stdout)
             if x.get('parent') == p['uuid']]
@@ -238,6 +238,6 @@ def test_native_recurrence_series_and_inheritance(env):
 
 def test_add_recurring_each(env):
     p = env.porcelain('add', 'Stretch', 'recur:daily', 'due:today', '--each')
-    assert p['selector'] == f'tw:stretch-{p["uuid"][:8]}/'
-    assert (env.nb_dir / 'tw' / f'stretch-{p["uuid"][:8]}').is_dir()
-    assert env.git_clean('tw')
+    assert p['selector'] == f'tasknotes:stretch-{p["uuid"][:8]}/'
+    assert (env.nb_dir / 'tasknotes' / f'stretch-{p["uuid"][:8]}').is_dir()
+    assert env.git_clean('tasknotes')
