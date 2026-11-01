@@ -1,0 +1,518 @@
+#!/usr/bin/env bash
+###############################################################################
+# tw.nb-plugin
+#
+# Taskwarrior tasks and their nb notes as linked pairs:
+#   nb tw note <id|uuid>          find or create the task's note
+#   nb tw add  <description> [attrs…]   add a task and its note
+#   nb tw link <selector> <id|uuid>     make an existing note a task's note
+#   nb tw info <selector>         Taskwarrior info for the task(s) a note is about
+#
+# The link: the task carries `nb: <notebook>:<path>` (authoritative); the note carries
+# `tw: <uuid>` in its frontmatter (a list when it serves several tasks). New notes are
+# `<slug>-<uuid8>.note.md` with `type: task`, in `tw:` unless told otherwise.
+#
+# Settings are taskrc entries (rc.*), e.g. in ~/.task/config/tw-nb.rc:
+#   tw.notebook        = tw     default notebook for new notes
+#   tw.notebook.<proj> = cine   new notes for project <proj> (or a sub-project) go here
+#   tw.folder_depth    = 1      folders in tw: from the project: 0 none, 1 kitchen/,
+#                               2 kitchen/reno/ (never deeper)
+#
+# Templates: <notebook>/.templates/task.md, {{field}} and {{field|default}} filled from the
+# task (description, project, uuid, uuid8, id, due, scheduled, priority, tags, status, date).
+#
+# Every run takes nb-web's lock ($NB_DIR/.logs/nb-web-nb.lock, nb-web invariant 72) unless
+# the caller already holds it and says so with NB_LOCK_HELD=1. `task` runs with
+# rc.hooks=off for everything except `add` itself (so on-add hooks such as recurrence see
+# a normal add). Notes are written directly and committed via `nb index reconcile
+# --commit`, never `nb edit --overwrite --content` (it truncates frontmatter notes).
+#
+# Part of https://github.com/linuxcaffe/nb-plugins. Plan: tw-nb-interop.
+###############################################################################
+
+_subcommands add "tw"
+
+_subcommands describe "tw" <<HEREDOC
+$(_color_primary "Usage"):
+  ${_ME} tw note <id|uuid> [--notebook <name>] [--porcelain]
+  ${_ME} tw add <description> [<attribute>...] [--notebook <name>] [--porcelain]
+  ${_ME} tw link <selector> <id|uuid> [--porcelain]
+  ${_ME} tw info <selector>
+
+$(_color_primary "Description"):
+  Pair Taskwarrior tasks with nb notes. The task gets an 'nb: <notebook>:<path>'
+  annotation; the note gets 'tw: <uuid>' in its frontmatter.
+
+  note   Open the task's note: the one its nb: annotation names, else one whose
+         frontmatter names the task, else a new one (type: task) in tw: (or
+         --notebook, or the project's tw.notebook.<project> setting).
+  add    Add a task (description first, then attributes such as project:x
+         due:fri +tag) and create its note.
+  link   Make an existing note this task's note. The note keeps its name, type
+         and body; only its frontmatter gains tw:.
+  info   Show 'task info' for every task a note is about.
+
+  --porcelain  print key: value lines (uuid, selector, path, created) for scripts.
+
+$(_color_primary "Examples"):
+  ${_ME} tw note 42
+  ${_ME} tw add "Grout the backsplash" project:kitchen due:fri
+  ${_ME} tw link cine:edl-definition.md 42
+  ${_ME} tw info tw:kitchen/grout-the-backsplash-1a2b3c4d.note.md
+HEREDOC
+
+# `nb info` was this plugin's only command in tw2nb; kept as an alias for a release.
+_subcommands add "info"
+_subcommands describe "info" <<HEREDOC
+$(_color_primary "Usage"):
+  ${_ME} info <selector>
+
+$(_color_primary "Description"):
+  Old name for '${_ME} tw info'.
+HEREDOC
+
+_info() {
+  _tw info "$@"
+}
+
+_tw() {
+  local _nb_bin=
+  _nb_bin="$(command -v nb || printf "%s" "${0}")"
+  NB_TW_BIN="${_nb_bin}" python3 -c "${_TW_NB_PY}" "$@"
+}
+
+read -r -d '' _TW_NB_PY <<'PYTHON' || true
+import contextlib, fcntl, json, os, re, subprocess, sys
+from datetime import date
+from pathlib import Path
+
+NB_DIR = Path(os.environ['NB_DIR'])
+NB_BIN = os.environ.get('NB_TW_BIN') or 'nb'
+UUID_RE = re.compile(r'^[0-9a-f]{8}(-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$')
+ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\([A-Za-z0-9]')
+
+
+def die(msg):
+    print(f'nb tw: {msg}', file=sys.stderr)
+    sys.exit(1)
+
+
+@contextlib.contextmanager
+def nb_lock():
+    if os.environ.get('NB_LOCK_HELD') == '1':
+        yield
+        return
+    path = NB_DIR / '.logs' / 'nb-web-nb.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'a') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+# ── Taskwarrior ───────────────────────────────────────────────────────────────
+
+def task(*args, hooks=False, check=True):
+    argv = ['task'] + ([] if hooks else ['rc.hooks=off']) + ['rc.confirmation=off'] + list(args)
+    r = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                       env={**os.environ, 'NO_COLOR': '1'})
+    if check and r.returncode != 0:
+        die(f'task {" ".join(args)} failed: {r.stderr.strip() or r.stdout.strip()}')
+    return r
+
+
+_rc_cache = None
+
+
+def rc(key, default=None):
+    global _rc_cache
+    if _rc_cache is None:
+        _rc_cache = {}
+        for line in task('rc.verbose=nothing', '_show', check=False).stdout.splitlines():
+            k, sep, v = line.partition('=')
+            if sep:
+                _rc_cache[k.strip()] = v.strip()
+    return _rc_cache.get(key, default)
+
+
+def get_task(ref):
+    """One task by numeric id or uuid (8 chars or full); dies if there isn't exactly one."""
+    if ref.isdigit():
+        filt = [ref]
+    elif UUID_RE.match(ref.lower()):
+        filt = [f'uuid:{ref}'] if len(ref) == 36 else [ref.lower()]
+    else:
+        die(f'not a task id or uuid: {ref}')
+    r = task('rc.json.array=on', *filt, 'export', check=False)
+    try:
+        tasks = json.loads(r.stdout or '[]')
+    except json.JSONDecodeError:
+        tasks = []
+    if not tasks:
+        die(f'no task {ref}')
+    if len(tasks) > 1:
+        die(f'{ref} matches {len(tasks)} tasks')
+    return tasks[0]
+
+
+def annotate(uuid, text):
+    task(uuid, 'annotate', '--', text)
+
+
+# ── selectors and paths ───────────────────────────────────────────────────────
+
+def is_notebook(name):
+    return bool(name) and not name.startswith('.') and (NB_DIR / name / '.git').exists()
+
+
+def split_selector(sel):
+    """'nb:rel/path.md' -> (nb, 'rel/path.md'); a bare path means tw: (or tw.notebook)."""
+    nb, sep, rel = sel.partition(':')
+    if sep and is_notebook(nb):
+        return nb, rel
+    return default_notebook(), sel
+
+
+def selector_path(sel):
+    """Lexically confined path for a path selector, or None (no '..', no absolute paths)."""
+    nb, rel = split_selector(sel)
+    if not rel or rel.startswith('/') or '..' in Path(rel).parts:
+        return None
+    return NB_DIR / nb / rel
+
+
+def resolve_selector(sel):
+    """Path for any selector: a path directly, else ask nb (ids, titles)."""
+    p = selector_path(sel)
+    if p and p.is_file():
+        return p
+    r = subprocess.run([NB_BIN, 'show', sel, '--path'], capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
+    out = ANSI_RE.sub('', r.stdout).strip()
+    if r.returncode == 0 and out and Path(out).is_file():
+        return Path(out)
+    return None
+
+
+def selector_for(path):
+    rel = path.relative_to(NB_DIR)
+    return f'{rel.parts[0]}:{Path(*rel.parts[1:]).as_posix()}'
+
+
+def default_notebook():
+    return rc('tw.notebook') or 'tw'
+
+
+def notebook_for(t, explicit=None):
+    if explicit:
+        return explicit
+    project = t.get('project', '')
+    parts = project.split('.') if project else []
+    for n in range(len(parts), 0, -1):
+        mapped = rc('tw.notebook.' + '.'.join(parts[:n]))
+        if mapped:
+            return mapped
+    return default_notebook()
+
+
+def folder_for(t, nb):
+    if nb != default_notebook() or not t.get('project'):
+        return ''
+    try:
+        depth = max(0, min(2, int(rc('tw.folder_depth', '1'))))
+    except ValueError:
+        depth = 1
+    parts = [slug(p) for p in t['project'].split('.')[:depth] if slug(p)]
+    return ''.join(p + '/' for p in parts)
+
+
+def slug(text):
+    """annn's sanitize_for_filename: lowercase, non-alnum -> '-', squeezed, trimmed, 40 chars."""
+    s = re.sub(r'[^a-z0-9]', '-', text.lower())
+    s = re.sub(r'-+', '-', s).strip('-')
+    return s[:40]
+
+
+# ── frontmatter ───────────────────────────────────────────────────────────────
+
+def split_frontmatter(text):
+    """(frontmatter lines, body) or (None, text)."""
+    if text.startswith('---\n'):
+        end = text.find('\n---\n', 3)
+        if end == -1 and text.endswith('\n---'):
+            end = len(text) - 4
+        if end != -1:
+            return text[4:end].split('\n') if end > 4 else [], text[end + 5:]
+    return None, text
+
+
+def fm_uuids(lines):
+    """uuids under the tw: key (scalar or list)."""
+    out, in_tw = [], False
+    for line in lines or []:
+        if re.match(r'^tw:\s*$', line):
+            in_tw = True
+            continue
+        m = re.match(r'^tw:\s*(\S+)', line)
+        if m:
+            out.append(m.group(1).strip('\'"'))
+            in_tw = False
+            continue
+        if in_tw:
+            m = re.match(r'^\s+-\s*(\S+)', line)
+            if m:
+                out.append(m.group(1).strip('\'"'))
+                continue
+            in_tw = False
+    return out
+
+
+def with_uuid(lines, uuid):
+    """Frontmatter lines with uuid added under tw: (scalar -> list on the second task)."""
+    have = fm_uuids(lines)
+    if uuid in have:
+        return lines
+    out, i, done = [], 0, False
+    while i < len(lines):
+        line = lines[i]
+        if not done and re.match(r'^tw:', line):
+            j = i + 1
+            while j < len(lines) and re.match(r'^\s+-', lines[j]):
+                j += 1
+            out.append('tw:')
+            out += [f'  - {u}' for u in have + [uuid]]
+            i, done = j, True
+            continue
+        out.append(line)
+        i += 1
+    if not done:
+        out.append(f'tw: {uuid}')
+    return out
+
+
+def yaml_str(s):
+    if s == '' or re.search(r'[:#\'"{}\[\],&*!|>%@`\\]', s) or s[0] in '-? ' or s[-1] == ' ':
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def contains_uuid(path, uuid):
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            head = f.read(4096)
+    except OSError:
+        return False
+    lines, _ = split_frontmatter(head)
+    return uuid in fm_uuids(lines)
+
+
+def find_by_uuid(uuid):
+    """A note whose frontmatter names this task, anywhere in any notebook (fallback only)."""
+    notebooks = [default_notebook()] + sorted(
+        p.name for p in NB_DIR.iterdir() if is_notebook(p.name) and p.name != default_notebook())
+    for nb in notebooks:
+        root = NB_DIR / nb
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+            for name in filenames:
+                if name.startswith('.') or not name.endswith('.md'):
+                    continue
+                p = Path(dirpath) / name
+                if contains_uuid(p, uuid):
+                    return p
+    return None
+
+
+# ── templates ─────────────────────────────────────────────────────────────────
+
+def fields(t):
+    return {
+        'description': t.get('description', ''), 'project': t.get('project', ''),
+        'uuid': t['uuid'], 'uuid8': t['uuid'][:8], 'id': str(t.get('id', '')),
+        'due': t.get('due', ''), 'scheduled': t.get('scheduled', ''),
+        'priority': t.get('priority', ''), 'tags': ' '.join(t.get('tags', [])),
+        'status': t.get('status', ''), 'date': date.today().isoformat(),
+    }
+
+
+def fill(text, values):
+    def sub(m):
+        name, _, default = m.group(1).partition('|')
+        return values.get(name.strip()) or default
+    return re.sub(r'\{\{\s*([a-z0-9_]+(?:\|[^}]*)?)\s*\}\}', sub, text)
+
+
+def note_body(t, nb):
+    tpl = NB_DIR / nb / '.templates' / 'task.md'
+    if tpl.is_file():
+        body = fill(tpl.read_text(), fields(t))
+        _, body = split_frontmatter(body)
+        return body if body.endswith('\n') else body + '\n'
+    return f'# {t.get("description", "")}\n'
+
+
+# ── writing ───────────────────────────────────────────────────────────────────
+
+def commit(path):
+    """Index the note's folder (and any new ancestors) and commit, nb's own way."""
+    r = subprocess.run([NB_BIN, 'index', 'reconcile', str(path.parent), '--ancestors', '--commit'],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    nb_root = NB_DIR / path.relative_to(NB_DIR).parts[0]
+    status = subprocess.run(['git', '-C', str(nb_root), 'status', '--porcelain'],
+                            capture_output=True, text=True).stdout
+    if status.strip():
+        subprocess.run(['git', '-C', str(nb_root), 'add', '-A'], capture_output=True)
+        subprocess.run(['git', '-C', str(nb_root), 'commit', '-q', '-m',
+                        f'[nb tw] {path.relative_to(nb_root)}'], capture_output=True)
+
+
+def create_note(t, nb):
+    if not is_notebook(nb):
+        die(f'no notebook {nb}')
+    folder = folder_for(t, nb)
+    path = NB_DIR / nb / folder / f'{slug(t.get("description") or "task") or "task"}-{t["uuid"][:8]}.note.md'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fm = ['type: task', f'tw: {t["uuid"]}', f'tw_status: {t.get("status", "pending")}',
+          f'title: {yaml_str(t.get("description", ""))}']
+    path.write_text('---\n' + '\n'.join(fm) + '\n---\n' + note_body(t, nb))
+    commit(path)
+    return path
+
+
+def note_annotations(t):
+    return [a['description'][4:].strip() for a in t.get('annotations', [])
+            if a.get('description', '').startswith('nb: ')]
+
+
+def find_note(t):
+    """(path, from_annotation) for the task's existing note, or (None, False)."""
+    for sel in note_annotations(t):
+        p = selector_path(sel)
+        if p and p.is_file():
+            return p, True
+    p = find_by_uuid(t['uuid'])
+    return (p, False) if p else (None, False)
+
+
+def report(porcelain, t, path, created):
+    sel = selector_for(path)
+    if porcelain:
+        print(f'uuid: {t["uuid"]}\nselector: {sel}\npath: {path}\ncreated: {"yes" if created else "no"}')
+    else:
+        print(f'{"Created" if created else "Note"}: {sel}')
+
+
+def ensure_note(t, notebook=None):
+    path, from_ann = find_note(t)
+    created = False
+    if path is None:
+        path = create_note(t, notebook_for(t, notebook))
+        created = True
+    if not from_ann:
+        annotate(t['uuid'], f'nb: {selector_for(path)}')
+    return path, created
+
+
+# ── commands ──────────────────────────────────────────────────────────────────
+
+def take_option(args, name):
+    if name in args:
+        i = args.index(name)
+        if i + 1 >= len(args):
+            die(f'{name} needs a value')
+        value = args[i + 1]
+        del args[i:i + 2]
+        return value
+    return None
+
+
+def cmd_note(args, porcelain):
+    notebook = take_option(args, '--notebook')
+    if len(args) != 1:
+        die('usage: nb tw note <id|uuid> [--notebook <name>]')
+    t = get_task(args[0])
+    path, created = ensure_note(t, notebook)
+    report(porcelain, t, path, created)
+
+
+def cmd_add(args, porcelain):
+    notebook = take_option(args, '--notebook')
+    if not args:
+        die('usage: nb tw add <description> [<attribute>...]')
+    desc, attrs = args[0], args[1:]
+    for a in attrs:   # attributes only: name:value, +tag, -tag (no words that could be commands)
+        # never an rc override (rc.name:value), never a command word (nb-web invariant 82)
+        if a.lower().startswith('rc.') or \
+                not re.match(r'^([a-z][a-z0-9_.]*:\S*|[+-][A-Za-z0-9_]+)$', a):
+            die(f'not an attribute: {a}')
+    r = task('rc.verbose=new-uuid', 'add', *attrs, '--', desc, hooks=True)
+    m = re.search(r'Created task ([0-9a-f-]{36})', r.stdout)
+    if not m:
+        die(f'task add printed no uuid: {r.stdout.strip()}')
+    t = get_task(m.group(1))
+    path, created = ensure_note(t, notebook)
+    report(porcelain, t, path, created)
+
+
+def cmd_link(args, porcelain):
+    if len(args) != 2:
+        die('usage: nb tw link <selector> <id|uuid>')
+    path = resolve_selector(args[0])
+    if not path:
+        die(f'no note {args[0]}')
+    t = get_task(args[1])
+    text = path.read_text()
+    lines, body = split_frontmatter(text)
+    new_lines = with_uuid(lines or [], t['uuid'])
+    if new_lines != lines:
+        path.write_text('---\n' + '\n'.join(new_lines) + '\n---\n' + body)
+        commit(path)
+    sel = selector_for(path)
+    if sel not in note_annotations(t):
+        annotate(t['uuid'], f'nb: {sel}')
+    report(porcelain, t, path, False)
+
+
+def cmd_info(args, porcelain):
+    if len(args) != 1:
+        die('usage: nb tw info <selector>')
+    path = resolve_selector(args[0])
+    if not path:
+        die(f'no note {args[0]}')
+    text = path.read_text(errors='replace')
+    lines, body = split_frontmatter(text)
+    uuids = fm_uuids(lines)
+    for u in re.findall(r'`([0-9a-f]{8})`', body):   # tw2nb's journal/archive format
+        if not any(x.startswith(u) for x in uuids):
+            uuids.append(u)
+    if not uuids:
+        die(f'no Taskwarrior uuids in {args[0]}')
+    for i, u in enumerate(uuids):
+        if len(uuids) > 1:
+            print('─' * 48)
+        r = task('rc.verbose=nothing', f'uuid:{u}' if len(u) == 36 else u, 'information', check=False)
+        print(r.stdout.rstrip() if r.returncode == 0 and r.stdout.strip() else f'not found: {u}')
+    if len(uuids) > 1:
+        print('─' * 48)
+
+
+def main():
+    args = sys.argv[1:]
+    porcelain = '--porcelain' in args
+    args = [a for a in args if a != '--porcelain']
+    if not args:
+        die('usage: nb tw (note|add|link|info) …   (nb help tw)')
+    cmd, rest = args[0], args[1:]
+    handler = {'note': cmd_note, 'add': cmd_add, 'link': cmd_link, 'info': cmd_info}.get(cmd)
+    if not handler:
+        die(f'unknown command {cmd} (note, add, link, info)')
+    with nb_lock():
+        handler(rest, porcelain)
+
+
+main()
+PYTHON

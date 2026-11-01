@@ -11,6 +11,7 @@ A collection of community plugins for [nb](https://xwmx.github.io/nb/) — the c
 | [cal.nb-plugin](#calnb-plugin) | `nb cal` | Date-aware calendar view and range search for date-stamped notes |
 | [grep.nb-plugin](#grepnb-plugin) | `nb g` | Context-aware search — see surrounding lines, not just the match |
 | [send.nb-plugin](#sendnb-plugin) | `nb send` | Send a file to an nb notebook via a GUI dialog (zenity); desktop file manager integration |
+| [tw.nb-plugin](#twnb-plugin) | `nb tw` | Pair Taskwarrior tasks with nb notes: find, create and link a task's note |
 
 ---
 
@@ -192,6 +193,76 @@ nb send                               # Caja script — reads env var automatica
 ```
 
 All activity is logged to `/tmp/nb-send.log` — useful for debugging file manager invocations where there is no visible terminal.
+
+---
+
+## tw.nb-plugin
+
+> For Taskwarrior users who keep notes in nb — every task can have a note, and every note knows its task.
+
+### What this does
+
+`nb tw` links a Taskwarrior task and an nb note in both directions. The task carries an
+annotation `nb: <notebook>:<path>` (the authoritative link); the note carries `tw: <uuid>` in its
+frontmatter (a list when one note serves several tasks).
+
+- `nb tw note 42` opens task 42's note: the one its `nb:` annotation names, else a note whose
+  frontmatter names the task (and the lost annotation is restored), else a new one.
+- New notes are `<slug>-<uuid8>.note.md` with `type: task`, in the `tw` notebook, filed in a
+  folder per project (`project:kitchen.reno` → `tw:kitchen/`).
+- `nb tw link` makes any existing note a task's note, without renaming it or changing its type.
+- `nb tw info` shows `task info` for every task a note is about (also the uuid8s tw2nb writes).
+
+Notes are written directly and committed with nb's own `index reconcile --commit`. Each run takes
+the same lock nb-web uses for nb (`$NB_DIR/.logs/nb-web-nb.lock`); a caller that already holds it
+sets `NB_LOCK_HELD=1`.
+
+### Install
+
+```bash
+nb notebooks add tw
+nb plugin install https://raw.githubusercontent.com/linuxcaffe/nb-plugins/main/tw.nb-plugin
+```
+
+Requires Taskwarrior 2.6 and Python 3. It replaces tw2nb's older `tw.nb-plugin` (`nb info` still
+works, as an alias of `nb tw info`).
+
+### Usage
+
+```bash
+nb tw note 42                                   # find or create task 42's note
+nb tw note 42 --notebook cine                   # create it in cine: instead
+nb tw add "Grout the backsplash" project:kitchen due:fri +reno
+nb tw link cine:edl-definition.md 42            # an existing note becomes task 42's note
+nb tw info tw:kitchen/grout-the-backsplash-1a2b3c4d.note.md
+nb tw note 42 --porcelain                       # uuid/selector/path/created, for scripts
+```
+
+`nb tw add` takes the description first, then attributes only (`name:value`, `+tag`, `-tag`):
+never a command word and never an `rc.` override.
+
+### Settings
+
+Taskwarrior config entries (put them in your `.taskrc` or an included file):
+
+```ini
+tw.notebook        = tw     # default notebook for new notes
+tw.notebook.film   = cine   # new notes for project film (and film.*) go to cine:
+tw.folder_depth    = 1      # 0: no folders, 1: tw:kitchen/, 2: tw:kitchen/reno/
+```
+
+### Templates
+
+If `<notebook>/.templates/task.md` exists, new notes start from it. `{{field}}` and
+`{{field|default}}` are filled from the task: `description`, `project`, `uuid`, `uuid8`, `id`,
+`due`, `scheduled`, `priority`, `tags`, `status`, `date`. Without a template a note starts with
+`# <description>`.
+
+### Tests
+
+```bash
+python3 -m pytest -q tests     # throwaway nb + Taskwarrior; never touches ~/.nb or ~/.task
+```
 
 ---
 
