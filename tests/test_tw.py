@@ -321,3 +321,15 @@ def test_find_never_creates(env):
     made = env.porcelain('note', uuid)
     found = env.porcelain('note', uuid, '--find')
     assert found['path'] == made['path'] and found['created'] == 'no'
+
+
+def test_add_odd_tags_go_through_tags_list(env):
+    """Taskwarrior silently drops +bug-fix; tags:bug-fix,v2.1 works (tw-web's own route)."""
+    p = env.porcelain('add', 'Tagged', 'tags:bug-fix,v2.1', '+next')
+    assert sorted(env.export(p['uuid'])['tags']) == ['bug-fix', 'next', 'v2.1']
+
+
+@pytest.mark.parametrize('word', ['+bug-fix', '+v2.1', '+a,b', "+it's"])
+def test_add_refuses_tags_taskwarrior_would_drop(env, word):
+    r = env.nb('tw', 'add', 'Odd', word, check=False)
+    assert r.returncode != 0 and 'not an attribute' in r.stderr and 'tags:' in r.stderr

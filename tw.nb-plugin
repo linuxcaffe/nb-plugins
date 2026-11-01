@@ -775,7 +775,7 @@ def cmd_add(args, porcelain):
         # never an rc override (rc.name:value), never a command word (nb-web invariant 82)
         if a.lower().startswith('rc.') or \
                 not re.match(r'^([a-z][a-z0-9_.]*:\S*|[+-][A-Za-z0-9_]+)$', a):
-            die(f'not an attribute: {a}')
+            die(f'not an attribute: {a}' + (' (for a tag Taskwarrior can\'t take as +tag, use tags:a,b)' if a[:1] in '+-' else ''))
     r = task('rc.verbose=new-uuid', 'add', *attrs, '--', desc, hooks=True)
     m = re.search(r'Created task ([0-9a-f-]{36})', r.stdout)
     if not m:
