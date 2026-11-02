@@ -333,3 +333,47 @@ def test_add_odd_tags_go_through_tags_list(env):
 def test_add_refuses_tags_taskwarrior_would_drop(env, word):
     r = env.nb('tw', 'add', 'Odd', word, check=False)
     assert r.returncode != 0 and 'not an attribute' in r.stderr and 'tags:' in r.stderr
+
+
+# ── a moved / renamed note: link replaces the stale annotation (djp, 2026-11-01) ──────────
+
+def _git_mv(env, nb, old, new):
+    d = env.nb_dir / nb
+    (d / new).parent.mkdir(parents=True, exist_ok=True)
+    env.run('git', '-C', str(d), 'mv', old, new)
+    env.run('git', '-C', str(d), 'commit', '-qm', 'move')
+
+
+def test_link_after_a_move_replaces_the_stale_annotation(env):
+    uuid = env.add_task('project:legal.dogbite', '--', 'Write thankyou note')
+    sel = env.porcelain('note', uuid)['selector']                 # tasknotes:legal/write-…
+    old_rel = sel.split(':', 1)[1]
+    name = old_rel.split('/')[-1]
+    _git_mv(env, 'tasknotes', old_rel, name)
+    env.nb('tw', 'link', f'tasknotes:{name}', uuid)
+    assert env.annotations(uuid) == [f'nb: tasknotes:{name}']
+
+
+def test_link_from_replaces_a_renamed_notes_annotation(env):
+    uuid = env.add_task('--', 'Rename me')
+    old = env.porcelain('note', uuid)['selector'].split(':', 1)[1]
+    _git_mv(env, 'tasknotes', old, 'renamed.note.md')
+    env.nb('tw', 'link', 'tasknotes:renamed.note.md', uuid, '--from', f'tasknotes:{old}')
+    assert env.annotations(uuid) == ['nb: tasknotes:renamed.note.md']
+
+
+def test_link_keeps_annotations_it_cannot_prove_stale(env):
+    """A note missing *here* may live on another station (a notebook that doesn't sync), and a
+    second note that still exists is a real link: neither is touched."""
+    uuid = env.add_task('--', 'Keep my links')
+    sel = env.porcelain('note', uuid)['selector']
+    env.task(uuid, 'annotate', '--', 'nb: cine:edl-definition.md')        # not on this machine
+    home = env.nb_dir / 'home'
+    (home / 'other.md').write_text('# Other\n')
+    env.task(uuid, 'annotate', '--', 'nb: home:other.md')                 # exists
+    old = sel.split(':', 1)[1]
+    _git_mv(env, 'tasknotes', old, 'moved.note.md')
+    env.nb('tw', 'link', 'tasknotes:moved.note.md', uuid, '--from', sel)
+    ann = env.annotations(uuid)
+    assert 'nb: cine:edl-definition.md' in ann and 'nb: home:other.md' in ann
+    assert sel not in [a[4:] for a in ann] and 'nb: tasknotes:moved.note.md' in ann

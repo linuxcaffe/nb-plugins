@@ -43,7 +43,7 @@ $(_color_primary "Usage"):
                [--porcelain]
   ${_ME} tw add <description> [<attribute>...] [--notebook <name>] [--series|--each]
                [--porcelain]
-  ${_ME} tw link <selector> <id|uuid> [--porcelain]
+  ${_ME} tw link <selector> <id|uuid> [--from <old selector>] [--porcelain]
   ${_ME} tw status <id|uuid>
   ${_ME} tw info <selector>
 
@@ -58,7 +58,8 @@ $(_color_primary "Description"):
   add    Add a task (description first, then attributes such as project:x
          due:fri +tag) and create its note.
   link   Make an existing note this task's note. The note keeps its name, type
-         and body; only its frontmatter gains tw:.
+         and body; only its frontmatter gains tw:. After a move it drops the
+         annotation naming the old path; after a rename, pass --from <old>.
   status Write the task's status (tw_status, tw_end) into its note; for a
          series note, log the occurrence under '## Occurrences'. Reopening
          reverses it. Locked notes and notes serving several tasks are skipped.
@@ -502,13 +503,26 @@ def annotation_target(sel):
     return resolve_annotation(sel)
 
 
-def link_to(uuid, target):
-    """Annotate the task with nb: <target> unless one of its annotations already points there."""
+def link_to(uuid, target, stale_from=None):
+    """Annotate the task with nb: <target> unless one of its annotations already points there,
+    then drop the annotations a move or rename left behind: ones that point nowhere *and*
+    name this same file (a move), or the selector given as stale_from (a rename). An
+    annotation that merely doesn't resolve here is kept: its note may live on another
+    station, in a notebook that doesn't sync to this one."""
     t = get_task(uuid)
-    if any(annotation_target(a) == target for a in note_annotations(t)):
+    have = note_annotations(t)
+    if not any(annotation_target(a) == target for a in have):
+        sel = selector_for(target) + ('/' if target.is_dir() else '')
+        annotate(uuid, f'nb: {sel}')
+    if target.is_dir():
         return
-    sel = selector_for(target) + ('/' if target.is_dir() else '')
-    annotate(uuid, f'nb: {sel}')
+    stale_from = (stale_from or '').removeprefix('nb: ').strip()
+    for a in have:
+        if annotation_target(a) is not None:
+            continue
+        same_file = a.rstrip('/').rsplit('/', 1)[-1].split(':')[-1] == target.name
+        if same_file or (stale_from and a == stale_from):
+            task(uuid, 'denotate', '--', f'nb: {a}')
 
 
 def find_note(t):
@@ -786,8 +800,9 @@ def cmd_add(args, porcelain):
 
 
 def cmd_link(args, porcelain):
+    stale_from = take_option(args, '--from')
     if len(args) != 2:
-        die('usage: nb tw link <selector> <id|uuid>')
+        die('usage: nb tw link <selector> <id|uuid> [--from <old selector>]')
     path = resolve_selector(args[0])
     if not path:
         die(f'no note {args[0]}')
@@ -797,7 +812,7 @@ def cmd_link(args, porcelain):
     if new_lines != lines:
         refuse_if_locked(path)
         write_note(path, new_lines, body)
-    link_to(t['uuid'], path)
+    link_to(t['uuid'], path, stale_from)
     report(porcelain, t, path, False)
 
 
