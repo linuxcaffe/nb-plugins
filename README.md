@@ -208,6 +208,11 @@ frontmatter (a list when one note serves several tasks).
 
 - `nb tw note 42` opens task 42's note: the one its `nb:` annotation names, else a note whose
   frontmatter names the task (and the lost annotation is restored), else a new one.
+- **Ask for a note from any client:** annotate the task with a bare `nb:` (a note in `tasknotes:`)
+  or `nb: <notebook>:` (a note in that notebook; note the trailing colon). `nb tw note` honours
+  the request: it makes or finds the note, adds the real link and removes the request; tw2nb's
+  on-exit hook runs it as soon as the annotation is saved. An unknown notebook leaves the
+  request in place and says why. `nb: djp` without the colon is still a note named `djp`.
 - New notes are `<slug>-<uuid8>.note.md` with `type: task`, in the `tasknotes` notebook, filed in
   a folder per project (`project:kitchen.reno` → `tasknotes:kitchen/`).
 - `nb tw link` makes any existing note a task's note, without renaming it or changing its type.

@@ -17,6 +17,10 @@
 # `tw: <uuid>` in its frontmatter (a list when it serves several tasks). New notes are
 # `<slug>-<uuid8>.note.md` with `type: task`, in `tasknotes:` unless told otherwise.
 #
+# An nb: request: annotate a task with a bare `nb:` (a note in tasknotes:) or `nb: <notebook>:`
+# (a note there), from any client. `nb tw note` honours it, replacing the request with the link;
+# tw2nb's on-exit hook runs that whenever a task carries one.
+#
 # Settings are taskrc entries (rc.*), e.g. in ~/.task/config/tw-nb.rc:
 #   tw.notebook        = tasknotes  default notebook for new notes
 #   tw.notebook.<proj> = cine   new notes for project <proj> (or a sub-project) go here
@@ -490,9 +494,26 @@ def set_keys(lines, updates, removes=()):
     return out
 
 
+# An nb: request (tw-nb-interop M7 (b)): a bare `nb:` asks for a note in the default notebook,
+# `nb: <notebook>:` for one there. An empty path ending in a colon; `nb: djp` (no colon) is a
+# note named djp, as ever. `nb tw note` honours it; tw2nb's on-exit hook runs that.
+REQUEST = re.compile(r'^nb:(?:\s+([A-Za-z0-9_.-]+):)?\s*$')
+
+
+def requests(t):
+    """[(annotation text, notebook or None)] for the task's nb: requests."""
+    out = []
+    for a in t.get('annotations', []):
+        m = REQUEST.match(a.get('description', ''))
+        if m:
+            out.append((a['description'], m.group(1)))
+    return out
+
+
 def note_annotations(t):
     return [a['description'][4:].strip() for a in t.get('annotations', [])
-            if a.get('description', '').startswith('nb: ')]
+            if a.get('description', '').startswith('nb: ')
+            and not REQUEST.match(a['description'])]
 
 
 def annotation_target(sel):
@@ -643,16 +664,25 @@ def ensure_recurring(t, tpl_uuid, notebook, each):
 
 
 def ensure_note(t, notebook=None, each=False):
+    reqs = requests(t)
+    if notebook is None and reqs:
+        notebook = next((nb for _, nb in reqs if nb), None)
+    if notebook and not is_notebook(notebook):
+        held = ' (the request stays)' if reqs else ''
+        die(f'no notebook "{notebook}"{held}')
     tpl_uuid = template_uuid(t)
     if tpl_uuid:
-        return ensure_recurring(t, tpl_uuid, notebook, each)
-    path, from_ann = find_note(t)
-    created = False
-    if path is None:
-        path = create_note(t, notebook_for(t, notebook))
-        created = True
-    if not from_ann:
-        annotate(t['uuid'], f'nb: {selector_for(path)}')
+        path, created = ensure_recurring(t, tpl_uuid, notebook, each)
+    else:
+        path, from_ann = find_note(t)
+        created = False
+        if path is None:
+            path = create_note(t, notebook_for(t, notebook))
+            created = True
+        if not from_ann:
+            annotate(t['uuid'], f'nb: {selector_for(path)}')
+    for text, _ in reqs:                          # fulfilled: the real link is there now
+        task(t['uuid'], 'denotate', '--', text)
     return path, created
 
 
