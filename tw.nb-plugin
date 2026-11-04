@@ -50,6 +50,8 @@ $(_color_primary "Usage"):
   ${_ME} tw link <selector> <id|uuid> [--from <old selector>] [--porcelain]
   ${_ME} tw status <id|uuid>
   ${_ME} tw info <selector>
+  ${_ME} tw restore <id|uuid>
+  ${_ME} tw unlink <id|uuid>
 
 $(_color_primary "Description"):
   Pair Taskwarrior tasks with nb notes. The task gets an 'nb: <notebook>:<path>'
@@ -68,6 +70,11 @@ $(_color_primary "Description"):
          series note, log the occurrence under '## Occurrences'. Reopening
          reverses it. Locked notes and notes serving several tasks are skipped.
   info   Show 'task info' for every task a note is about.
+  restore  Bring back the task's note from git, after it was deleted in nb (at
+         the path its nb: link names).
+  unlink Drop the task's nb: link. A note that still exists becomes a plain
+         note: type: note, frontmatter kept, tw: renamed tw_was:. A link to a
+         notebook not on this station is kept.
 
   Recurring tasks: one note for the series (default), or --each: a folder
   with one note per occurrence. The template's nb: annotation records the
@@ -343,6 +350,16 @@ def contains_uuid(path, uuid):
     return uuid in fm_uuids(lines)
 
 
+def was_unlinked(path, uuid):
+    """The note was this task's, until `nb tw unlink` made it a plain note (tw_was:)."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            lines, _ = split_frontmatter(f.read(4096))
+    except OSError:
+        return False
+    return any(re.match(rf'^tw_was:\s*[\'"]?{re.escape(uuid)}', l) for l in lines or [])
+
+
 def find_by_uuid(uuid):
     """A note whose frontmatter names this task, anywhere in any notebook (fallback only)."""
     notebooks = [default_notebook()] + sorted(
@@ -358,7 +375,9 @@ def find_by_uuid(uuid):
                     continue
                 p = Path(dirpath) / name
                 # annn's <slug>-<uuid8>.note.md has no frontmatter until migrated
-                if name.endswith(f'-{uuid[:8]}.note.md') or contains_uuid(p, uuid):
+                if contains_uuid(p, uuid):
+                    return p
+                if name.endswith(f'-{uuid[:8]}.note.md') and not was_unlinked(p, uuid):
                     return p
     return None
 
@@ -458,6 +477,10 @@ def create_note(t, nb, folder=None, extra=()):
             die(f'no notebook {nb}')
         folder = NB_DIR / nb / folder_for(t, nb)
     path = folder / f'{note_filename(t)}.note.md'
+    n = 2
+    while path.exists():          # never over an existing note (one `nb tw unlink` left behind)
+        path = folder / f'{note_filename(t)}-{n}.note.md'
+        n += 1
     refuse_if_locked(path)
     folder.mkdir(parents=True, exist_ok=True)
     nb = path.relative_to(NB_DIR).parts[0]
@@ -895,17 +918,106 @@ def cmd_info(args, porcelain):
         print('─' * 48)
 
 
+# ── restore and unlink (djp 2026-11-04: notes deleted in nb left their tasks' links dangling) ──
+
+def deleted_link(sel):
+    """(path, commit) when an nb: link names a file git shows deleted in a notebook here; else
+    None. A link that only doesn't resolve here (its note on another station, a notebook not
+    synced to this one) is not deleted: link_to keeps those too."""
+    if sel.endswith('/'):
+        return None
+    path = selector_path(sel, default_notebook())
+    if not path or path.exists():
+        return None
+    root = NB_DIR / path.relative_to(NB_DIR).parts[0]
+    rel = path.relative_to(root).as_posix()
+    r = subprocess.run(['git', '-C', str(root), 'log', '-1', '--diff-filter=D', '--format=%H', '--', rel],
+                       capture_output=True, text=True)
+    sha = r.stdout.strip()
+    return (path, sha) if r.returncode == 0 and sha else None
+
+
+def cmd_restore(args, porcelain):
+    if len(args) != 1:
+        die('usage: nb tw restore <id|uuid>')
+    t = get_task(args[0])
+    done = []
+    for a in note_annotations(t):
+        hit = deleted_link(a)
+        if not hit:
+            continue
+        path, sha = hit
+        root = NB_DIR / path.relative_to(NB_DIR).parts[0]
+        rel = path.relative_to(root).as_posix()
+        r = subprocess.run(['git', '-C', str(root), 'checkout', f'{sha}^', '--', rel],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            die(f'could not restore {selector_for(path)}: {r.stderr.strip()}')
+        commit(path)
+        mirror(path, t)
+        done.append(path)
+        print(f'restored {selector_for(path)}')
+    if not done:
+        die(f'nothing to restore: no deleted note among task {t["uuid"][:8]}\'s links')
+    report(porcelain, t, done[0], False) if porcelain else None
+
+
+def without_uuid(lines, uuid):
+    """Frontmatter lines with uuid gone from tw:; with no task left, the note is a plain one
+    (type: note) and keeps the uuid as tw_was: (history, never a claim)."""
+    have = fm_uuids(lines)
+    rest = [u for u in have if u != uuid]
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r'^tw:', line):
+            j = i + 1
+            while j < len(lines) and re.match(r'^\s+-', lines[j]):
+                j += 1
+            if len(rest) == 1:
+                out.append(f'tw: {rest[0]}')
+            elif rest:
+                out.append('tw:')
+                out += [f'  - {u}' for u in rest]
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    if not rest:
+        out = set_keys(out, {'type': 'note', 'tw_was': uuid})
+    return out
+
+
+def cmd_unlink(args, porcelain):
+    if len(args) != 1:
+        die('usage: nb tw unlink <id|uuid>')
+    t = get_task(args[0])
+    for a in note_annotations(t):
+        target = annotation_target(a)
+        if target and target.is_file():
+            lines, body = split_frontmatter(target.read_text(errors='replace'))
+            if lines is not None and t['uuid'] in fm_uuids(lines):
+                refuse_if_locked(target)
+                write_note(target, without_uuid(lines, t['uuid']), body)
+                print(f'kept {selector_for(target)} as a plain note')
+        elif target is None and not deleted_link(a):
+            print(f'kept nb: {a}: not a note here (another station\'s?)')
+            continue
+        task(t['uuid'], 'denotate', '--', f'nb: {a}')
+        print(f'unlinked nb: {a}')
+
+
 def main():
     args = sys.argv[1:]
     porcelain = '--porcelain' in args
     args = [a for a in args if a != '--porcelain']
     if not args:
-        die('usage: nb tw (note|add|link|status|info) …   (nb help tw)')
+        die('usage: nb tw (note|add|link|status|info|restore|unlink) …   (nb help tw)')
     cmd, rest = args[0], args[1:]
     handler = {'note': cmd_note, 'add': cmd_add, 'link': cmd_link, 'info': cmd_info,
-               'status': cmd_status}.get(cmd)
+               'status': cmd_status, 'restore': cmd_restore, 'unlink': cmd_unlink}.get(cmd)
     if not handler:
-        die(f'unknown command {cmd} (note, add, link, status, info)')
+        die(f'unknown command {cmd} (note, add, link, status, info, restore, unlink)')
     with nb_lock():
         handler(rest, porcelain)
 

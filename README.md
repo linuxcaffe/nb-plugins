@@ -220,6 +220,10 @@ frontmatter (a list when one note serves several tasks).
   completed or deleted); reopening reverses it. Meant for hooks: it follows annotations only and
   never scans. A note serving several tasks gets no single status.
 - `nb tw info` shows `task info` for every task a note is about (also the uuid8s tw2nb writes).
+- `nb tw restore 42` brings back a note deleted in nb, from its notebook's git history, at the path
+  the task's `nb:` link names. `nb tw unlink 42` drops the link instead; a note that still exists
+  becomes a plain note (`type: note`, frontmatter kept, `tw:` renamed `tw_was:`, so it's never
+  adopted again). A link to a notebook that isn't on this station is left alone by both.
 - Locks are respected the way nb-web does: a `.nb-lock` in the folder chain or a note's own
   `lock: yes` means nothing is written there.
 
@@ -257,7 +261,7 @@ nb tw status 42                                 # after task 42 done/delete/modi
 nb tw note 42 --porcelain                       # uuid/selector/path/created, for scripts
 ```
 
-`nb tw` needs a command (`note`, `add`, `link`, `status`, `info`); if you also have a notebook
+`nb tw` needs a command (`note`, `add`, `link`, `status`, `info`, `restore`, `unlink`); if you also have a notebook
 named `tw`, bare `nb tw` lists that notebook instead. `nb help tw` shows nothing, as for any nb plugin: this README is the help.
 
 `nb tw add` takes the description first, then attributes only (`name:value`, `+tag`, `-tag`):
