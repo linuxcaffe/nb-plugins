@@ -51,7 +51,7 @@ $(_color_primary "Usage"):
   ${_ME} tw status <id|uuid>
   ${_ME} tw info <selector>
   ${_ME} tw restore <id|uuid>
-  ${_ME} tw unlink <id|uuid>
+  ${_ME} tw unlink <id|uuid> [--note <selector>]
 
 $(_color_primary "Description"):
   Pair Taskwarrior tasks with nb notes. The task gets an 'nb: <notebook>:<path>'
@@ -76,7 +76,8 @@ $(_color_primary "Description"):
          the path its nb: link names).
   unlink Drop the task's nb: link. A note that still exists becomes a plain
          note: type: note, frontmatter kept, tw: renamed tw_was:. A link to a
-         notebook not on this station is kept.
+         notebook not on this station is kept. --note also makes that note plain,
+         even when the task is gone (purged).
 
   Recurring tasks: one note for the series (default), or --each: a folder
   with one note per occurrence. The template's nb: annotation records the
@@ -1080,18 +1081,39 @@ def without_uuid(lines, uuid):
     return out
 
 
+def make_plain(path, uuid):
+    lines, body = split_frontmatter(path.read_text(errors='replace'))
+    if lines is not None and uuid in fm_uuids(lines):
+        refuse_if_locked(path)
+        write_note(path, without_uuid(lines, uuid), body)
+        print(f'kept {selector_for(path)} as a plain note')
+
+
 def cmd_unlink(args, porcelain):
+    note = take_option(args, '--note')
     if len(args) != 1:
-        die('usage: nb tw unlink <id|uuid>')
+        die('usage: nb tw unlink <id|uuid> [--note <selector>]')
+    if note:
+        path = resolve_selector(note)
+        if not path:
+            die(f'no note {note}')
+        r = task('rc.json.array=on', f'uuid:{args[0]}' if len(args[0]) == 36 else args[0], 'export', check=False)
+        try:
+            found = json.loads(r.stdout or '[]')
+        except json.JSONDecodeError:
+            found = []
+        if not found:                 # the task is gone (purged, deleted elsewhere): the note alone
+            if not UUID_RE.match(args[0].lower()) or len(args[0]) != 36:
+                die('a task that is gone needs its full uuid')
+            make_plain(path, args[0].lower())
+            return
     t = get_task(args[0])
+    if note:
+        make_plain(path, t['uuid'])
     for a in note_annotations(t):
         target = annotation_target(a)
         if target and target.is_file():
-            lines, body = split_frontmatter(target.read_text(errors='replace'))
-            if lines is not None and t['uuid'] in fm_uuids(lines):
-                refuse_if_locked(target)
-                write_note(target, without_uuid(lines, t['uuid']), body)
-                print(f'kept {selector_for(target)} as a plain note')
+            make_plain(target, t['uuid'])
         elif target is None and not deleted_link(a):
             print(f'kept nb: {a}: not a note here (another station\'s?)')
             continue

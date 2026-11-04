@@ -77,3 +77,23 @@ def test_unlink_keeps_a_link_that_only_does_not_resolve_here(env):
     env.task(uuid, 'annotate', '--', 'nb: mobile:elsewhere.md')   # no mobile notebook here
     env.nb('tw', 'unlink', uuid)
     assert env.annotations(uuid) == ['nb: mobile:elsewhere.md']
+
+
+def test_unlink_with_note_makes_a_purged_tasks_note_plain(env):
+    """An orphan (djp 2026-11-04): the task was deleted elsewhere and purged; its note stays,
+    and the header can still make it a plain note, by the note."""
+    uuid, p, path = made(env, 'Gone for good')
+    env.task(uuid, 'delete')
+    env.task(uuid, 'purge')
+    r = env.nb('tw', 'unlink', uuid, '--note', p['selector'])
+    meta = fm(path)
+    assert meta['type'] == 'note' and meta['tw_was'] == uuid and 'tw' not in meta
+    assert 'plain note' in r.stdout
+
+
+def test_unlink_without_the_task_or_a_note_says_why(env):
+    uuid, p, path = made(env, 'Gone too')
+    env.task(uuid, 'delete')
+    env.task(uuid, 'purge')
+    r = env.nb('tw', 'unlink', uuid, check=False)
+    assert r.returncode != 0 and 'no task' in r.stderr
