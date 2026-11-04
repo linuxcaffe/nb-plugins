@@ -219,6 +219,10 @@ frontmatter (a list when one note serves several tasks).
 - `nb tw status 42` writes the task's status into its note (`tw_status`, and `tw_end` once it's
   completed or deleted); reopening reverses it. Meant for hooks: it follows annotations only and
   never scans. A note serving several tasks gets no single status.
+- The note's frontmatter carries the task, so nb can search and sort by it: `title` (the
+  description), `tw_project`, `tw_due` (a local date), `tw_priority` and `tags`, written when the
+  note is made and on every `nb tw status`. A tag added in nb stays beside the task's: `tw_tags`
+  records which came from the task. One-way: editing these in nb doesn't change the task.
 - `nb tw info` shows `task info` for every task a note is about (also the uuid8s tw2nb writes).
 - `nb tw restore 42` brings back a note deleted in nb, from its notebook's git history, at the path
   the task's `nb:` link names. `nb tw unlink 42` drops the link instead; a note that still exists

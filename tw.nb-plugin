@@ -66,7 +66,9 @@ $(_color_primary "Description"):
   link   Make an existing note this task's note. The note keeps its name, type
          and body; only its frontmatter gains tw:. After a move it drops the
          annotation naming the old path; after a rename, pass --from <old>.
-  status Write the task's status (tw_status, tw_end) into its note; for a
+  status Write the task into its note (tw_status, tw_end, title, tw_project,
+         tw_due, tw_priority, and tags beside the note's own; tw_tags says
+         which came from the task); for a
          series note, log the occurrence under '## Occurrences'. Reopening
          reverses it. Locked notes and notes serving several tasks are skipped.
   info   Show 'task info' for every task a note is about.
@@ -484,8 +486,8 @@ def create_note(t, nb, folder=None, extra=()):
     refuse_if_locked(path)
     folder.mkdir(parents=True, exist_ok=True)
     nb = path.relative_to(NB_DIR).parts[0]
-    fm = ['type: task', f'tw: {t["uuid"]}', *extra, f'tw_status: {effective_status(t)}',
-          f'title: {yaml_str(t.get("description", ""))}']
+    fm = task_fields(['type: task', f'tw: {t["uuid"]}', *extra, f'tw_status: {effective_status(t)}',
+                      f'title: {yaml_str(t.get("description", ""))}'], t)
     write_note(path, fm, note_body(t, nb))
     return path
 
@@ -732,8 +734,102 @@ def effective_status(t):
     return status
 
 
+def fm_list(lines, key):
+    """A frontmatter value as a list of words: `key: [a, b]`, `key: a,b c` or a block list;
+    None when the key isn't there."""
+    for i, line in enumerate(lines or []):
+        m = re.match(rf'^{re.escape(key)}:\s*(.*)$', line)
+        if not m:
+            continue
+        v = m.group(1).strip()
+        if not v:
+            out = []
+            for l in lines[i + 1:]:
+                mm = re.match(r'^\s+-\s*(.+)$', l)
+                if not mm:
+                    break
+                out.append(mm.group(1).strip().strip('\'"'))
+            return [w.lstrip('#') for w in out if w]
+        v = v.strip('[]')
+        return [w.strip().strip('\'"').lstrip('#') for w in re.split(r'[,\s]+', v) if w.strip().strip('\'"')]
+    return None
+
+
+def put_keys(lines, updates, removes=()):
+    """set_keys, also for keys written as block lists (their `  - ` lines go with them)."""
+    out, seen, skip = [], set(), False
+    for line in lines:
+        if skip and re.match(r'^\s+-', line):
+            continue
+        skip = False
+        m = re.match(r'^([A-Za-z0-9_-]+):', line)
+        key = m.group(1) if m else None
+        if key in removes or key in updates:
+            skip = True
+            if key in updates and key not in seen:
+                out.append(f'{key}: {updates[key]}')
+                seen.add(key)
+            continue
+        out.append(line)
+    out += [f'{k}: {v}' for k, v in updates.items() if k not in seen]
+    return out
+
+
+def local_date(stamp):
+    from datetime import datetime, timezone
+    utc = datetime.strptime(stamp, '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+    return utc.astimezone().date().isoformat()
+
+
+def flow(words):
+    return '[' + ', '.join(words) + ']'
+
+
+def task_fields(lines, t):
+    """Frontmatter lines carrying the task's status, title, project, due, priority and tags
+    (djp 2026-11-04). Tags sit beside nb's own: tw_tags records which came from the task; a
+    note from before it counts a tag the task has as the task's. In place, so an unchanged task
+    leaves the lines as they were."""
+    updates, removes = {}, []
+    status = effective_status(t)
+    updates['tw_status'] = status
+    if status in ('completed', 'deleted'):
+        updates['tw_end'] = end_date(t)
+    else:
+        removes.append('tw_end')
+    if t.get('description'):
+        updates['title'] = yaml_str(t['description'])
+    for key, val in (('tw_project', t.get('project')),
+                     ('tw_due', t.get('due') and local_date(t['due'])),
+                     ('tw_priority', t.get('priority'))):
+        if val:
+            updates[key] = val
+        else:
+            removes.append(key)
+    task_tags = list(t.get('tags', []))
+    have = fm_list(lines, 'tags') or []
+    was = fm_list(lines, 'tw_tags')
+    if was is None:
+        was = [w for w in have if w in task_tags]
+    own = [w for w in have if w not in was]
+    tags = own + [w for w in task_tags if w not in own]
+    if tags:
+        updates['tags'] = flow(tags)
+    else:
+        removes.append('tags')
+    if task_tags:
+        updates['tw_tags'] = flow(task_tags)
+    else:
+        removes.append('tw_tags')
+    # an unchanged value stays exactly as written (`tags: bug,test` isn't rewritten for nothing)
+    for key, want in (('tags', tags), ('tw_tags', task_tags)):
+        if key in updates and fm_list(lines, key) == want:
+            del updates[key]
+    return put_keys(lines, updates, removes)
+
+
 def mirror(path, t):
-    """Write t's status into the note, if the note is this task's alone and not locked."""
+    """Write t's fields into the note, if the note is this task's alone and not locked."""
     lines, body = split_frontmatter(path.read_text(errors='replace'))
     if lines is None or fm_uuids(lines) != [t['uuid']]:
         return                    # annn's plain notes, notes serving several tasks
@@ -741,11 +837,7 @@ def mirror(path, t):
     if why:
         print(f'skipped {selector_for(path)}: {why}')
         return
-    status = effective_status(t)
-    if status in ('completed', 'deleted'):
-        new = set_keys(lines, {'tw_status': status, 'tw_end': end_date(t)})
-    else:
-        new = set_keys(lines, {'tw_status': status}, removes=('tw_end',))
+    new = task_fields(lines, t)
     if new != lines:
         write_note(path, new, body)
 
