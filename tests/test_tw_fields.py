@@ -72,3 +72,58 @@ def test_nothing_changed_writes_nothing(env):
     before, text = head(), path.read_text()
     env.nb('tw', 'status', uuid)
     assert (head(), path.read_text()) == (before, text)
+
+
+# ── Plain project / due / priority (djp 2026-11-04) ───────────────────────────
+# Beside tw_project, tw_due, tw_priority, so nb-web's fm: and other notes' own `project:` find
+# task notes too. The note's own value wins: the plain key follows the task only while it still
+# holds what the task put there (the tw_ key remembers that). tw_status stays prefixed only:
+# `status:` means other things in nb-web (todos, invoices, jobs).
+
+def test_a_new_note_has_the_plain_fields_too(env):
+    uuid = env.add_task('project:kitchen', 'due:2026-12-01', 'priority:H', '--', 'Retile')
+    m = fm(note_of(env, uuid))
+    assert (m['project'], str(m['due']), m['priority']) == ('kitchen', '2026-12-01', 'H')
+    assert 'status' not in m
+
+
+def test_plain_fields_follow_the_task_while_they_are_its(env):
+    uuid = env.add_task('project:kitchen', 'due:2026-12-01', 'priority:H', '--', 'Retile')
+    path = note_of(env, uuid)
+    env.task(uuid, 'modify', 'project:kitchen.floor', 'due:2026-12-15', 'priority:L')
+    env.nb('tw', 'status', uuid)
+    m = fm(path)
+    assert (m['project'], str(m['due']), m['priority']) == ('kitchen.floor', '2026-12-15', 'L')
+    assert (m['tw_project'], str(m['tw_due']), m['tw_priority']) == ('kitchen.floor', '2026-12-15', 'L')
+
+
+def test_the_notes_own_value_wins(env):
+    uuid = env.add_task('project:kitchen', 'priority:H', '--', 'Retile')
+    path = note_of(env, uuid)
+    path.write_text(path.read_text().replace('\nproject: kitchen\n', '\nproject: reno-2026\n'))
+    env.task(uuid, 'modify', 'project:bath', 'priority:M')
+    env.nb('tw', 'status', uuid)
+    m = fm(path)
+    assert m['project'] == 'reno-2026' and m['tw_project'] == 'bath'   # yours stays, the task's beside it
+    assert m['priority'] == 'M'                                         # still the task's: follows
+
+
+def test_a_dropped_field_goes_unless_it_is_the_notes_own(env):
+    uuid = env.add_task('project:kitchen', 'due:2026-12-01', '--', 'Retile')
+    path = note_of(env, uuid)
+    path.write_text(path.read_text().replace('\nproject: kitchen\n', '\nproject: mine\n'))
+    env.task(uuid, 'modify', 'project:', 'due:')
+    env.nb('tw', 'status', uuid)
+    m = fm(path)
+    assert 'due' not in m and 'tw_due' not in m and 'tw_project' not in m
+    assert m['project'] == 'mine'
+
+
+def test_a_note_from_before_gains_the_plain_fields(env):
+    uuid = env.add_task('project:kitchen', 'priority:H', '--', 'Older')
+    path = note_of(env, uuid)
+    path.write_text(path.read_text().replace('\nproject: kitchen\n', '\n').replace('\npriority: H\n', '\n'))
+    assert 'project' not in fm(path)
+    env.nb('tw', 'status', uuid)
+    m = fm(path)
+    assert (m['project'], m['priority']) == ('kitchen', 'H')

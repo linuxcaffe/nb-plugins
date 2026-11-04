@@ -66,9 +66,9 @@ $(_color_primary "Description"):
   link   Make an existing note this task's note. The note keeps its name, type
          and body; only its frontmatter gains tw:. After a move it drops the
          annotation naming the old path; after a rename, pass --from <old>.
-  status Write the task into its note (tw_status, tw_end, title, tw_project,
-         tw_due, tw_priority, and tags beside the note's own; tw_tags says
-         which came from the task); for a
+  status Write the task into its note (tw_status, tw_end, title, project,
+         due, priority and tags; the tw_ keys record the task's values, so
+         a value the note set itself stays); for a
          series note, log the occurrence under '## Occurrences'. Reopening
          reverses it. Locked notes and notes serving several tasks are skipped.
   info   Show 'task info' for every task a note is about.
@@ -756,6 +756,15 @@ def fm_list(lines, key):
     return None
 
 
+def fm_scalar(lines, key):
+    """A one-line frontmatter value as text (quotes off); None when the key isn't there."""
+    for line in lines or []:
+        m = re.match(rf'^{re.escape(key)}:\s*(.*)$', line)
+        if m:
+            return m.group(1).split(' #', 1)[0].strip().strip('\'"')
+    return None
+
+
 def put_keys(lines, updates, removes=()):
     """set_keys, also for keys written as block lists (their `  - ` lines go with them)."""
     out, seen, skip = [], set(), False
@@ -788,7 +797,8 @@ def flow(words):
 
 def task_fields(lines, t):
     """Frontmatter lines carrying the task's status, title, project, due, priority and tags
-    (djp 2026-11-04). Tags sit beside nb's own: tw_tags records which came from the task; a
+    (djp 2026-11-04): tw_project, tw_due, tw_priority, and plain project/due/priority while
+    they are the task's. Tags sit beside nb's own: tw_tags records which came from the task; a
     note from before it counts a tag the task has as the task's. In place, so an unchanged task
     leaves the lines as they were."""
     updates, removes = {}, []
@@ -800,13 +810,22 @@ def task_fields(lines, t):
         removes.append('tw_end')
     if t.get('description'):
         updates['title'] = yaml_str(t['description'])
-    for key, val in (('tw_project', t.get('project')),
-                     ('tw_due', t.get('due') and local_date(t['due'])),
-                     ('tw_priority', t.get('priority'))):
+    for key, val in (('project', t.get('project')),
+                     ('due', t.get('due') and local_date(t['due'])),
+                     ('priority', t.get('priority'))):
+        # tw_<key> is the record of the task's value; the plain key (what fm: and other notes'
+        # own `project:` use) follows it only while it still holds the task's last value: one
+        # the note set itself stays (djp 2026-11-04). tw_status stays prefixed only.
+        mine, was = fm_scalar(lines, key), fm_scalar(lines, 'tw_' + key)
+        ours = mine is None or mine == was
         if val:
-            updates[key] = val
+            updates['tw_' + key] = val
+            if ours:
+                updates[key] = val
         else:
-            removes.append(key)
+            removes.append('tw_' + key)
+            if ours:
+                removes.append(key)
     task_tags = list(t.get('tags', []))
     have = fm_list(lines, 'tags') or []
     was = fm_list(lines, 'tw_tags')
