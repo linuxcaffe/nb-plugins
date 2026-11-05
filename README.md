@@ -215,7 +215,11 @@ frontmatter (a list when one note serves several tasks).
   request in place and says why. `nb: djp` without the colon is still a note named `djp`.
 - New notes are `<slug>-<uuid8>.note.md` with `type: task`, in the `tasknotes` notebook, filed in
   a folder per project (`project:kitchen.reno` → `tasknotes:kitchen/`).
-- `nb tw link` makes any existing note a task's note, without renaming it or changing its type.
+- `nb tw link <note> <id|uuid>` makes an existing note a task's note, without renaming it: `tw:`
+  gets the full uuid (an ID or short uuid written there by hand is resolved, since IDs change),
+  and the note becomes `type: task` unless it has a type of its own (`project`, `job`, …).
+  From the task's side, annotating it `nb: <notebook>:<path>` does the same: the next
+  `nb tw status` (tw2nb's hook) adopts the note, never one that names another task.
 - `nb tw status 42` writes the task's status into its note (`tw_status`, and `tw_end` once it's
   completed or deleted); reopening reverses it. Meant for hooks: it follows annotations only and
   never scans. A note serving several tasks gets no single status.

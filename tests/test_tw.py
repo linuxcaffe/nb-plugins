@@ -192,7 +192,7 @@ def test_link_note_without_frontmatter(env):
     uuid = env.add_task('--', 'Plain link')
     env.nb('tw', 'link', 'home:plain.md', uuid)
     text = (home / 'plain.md').read_text()
-    assert text.startswith(f'---\ntw: {uuid}\n---\n')
+    assert text.startswith(f'---\ntw: {uuid}\ntype: task\n')   # linking makes it a task note (djp 2026-11-04)
     assert text.endswith('# Plain\n')
 
 

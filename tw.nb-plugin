@@ -63,10 +63,14 @@ $(_color_primary "Description"):
          --find only looks: no new note, no annotation; exit 1 if none.
   add    Add a task (description first, then attributes such as project:x
          due:fri +tag) and create its note.
-  link   Make an existing note this task's note. The note keeps its name, type
-         and body; only its frontmatter gains tw:. After a move it drops the
-         annotation naming the old path; after a rename, pass --from <old>.
-  status Write the task into its note (tw_status, tw_end, title, project,
+  link   Make an existing note this task's note. The note keeps its name and
+         body; its frontmatter gains tw: (an ID or short uuid already there
+         becomes the full uuid), and type: task unless it has a type of its own.
+         After a move it drops the annotation naming the old path; after a
+         rename, pass --from <old>.
+  status Adopt a note the task's nb: annotation names but which doesn't name
+         the task (as link does; never another task's note), then write the
+         task into its note (tw_status, tw_end, title, project,
          due, priority and tags; the tw_ keys record the task's values, so
          a value the note set itself stays); for a
          series note, log the occurrence under '## Occurrences'. Reopening
@@ -312,6 +316,49 @@ def fm_uuids(lines):
                 continue
             in_tw = False
     return out
+
+
+def refers_to(ref, t):
+    """A tw: value written by hand that names task t without being its full uuid: its ID (which
+    changes after gc) or a short uuid."""
+    r = str(ref).strip().lower()
+    if r.isdigit():
+        return bool(t.get('id')) and int(r) == int(t['id'])
+    return 8 <= len(r) < 36 and t['uuid'].startswith(r)
+
+
+def linked_lines(lines, t):
+    """Frontmatter lines naming task t: a hand-written ref to it (an ID, a short uuid) becomes its
+    full uuid (one task: a scalar), and a note with no type, or the plain `note`, becomes
+    `type: task`; a type of its own (project, job, cine) stays (djp 2026-11-04)."""
+    refs = fm_uuids(lines)
+    keep = [r for r in refs if r == t['uuid'] or not refers_to(r, t)]
+    if keep != refs:
+        lines = put_keys(lines, {}, ['tw'])
+        for r in keep:
+            lines = with_uuid(lines, r)
+    lines = with_uuid(lines, t['uuid'])
+    typ = (fm_scalar(lines, 'type') or '').lower()
+    if typ in ('', 'note'):
+        lines = put_keys(lines, {'type': 'task'})
+    return lines
+
+
+def adopt(path, t):
+    """A note the task's nb: annotation points at, but which doesn't name the task (an
+    annotation added in tw-web, the CLI, vit): link it from this side too. Only a note that
+    names no task, or only short refs to this one: another task's note is never taken over."""
+    lines, body = split_frontmatter(path.read_text(errors='replace'))
+    if lines is None and t['uuid'][:8] in path.name:
+        return                          # annn's own plain note, found by its name (M1): as it is
+    refs = fm_uuids(lines or [])
+    if refs == [t['uuid']] or any(r != t['uuid'] and not refers_to(r, t) for r in refs):
+        return
+    why = lock_reason(path)
+    if why:
+        print(f'skipped {selector_for(path)}: {why}')
+        return
+    write_note(path, linked_lines(lines or [], t), body)
 
 
 def with_uuid(lines, uuid):
@@ -973,11 +1020,14 @@ def cmd_link(args, porcelain):
         die(f'no note {args[0]}')
     t = get_task(args[1])
     lines, body = split_frontmatter(path.read_text())
-    new_lines = with_uuid(lines or [], t['uuid'])
+    new_lines = linked_lines(lines or [], t)
+    if len(fm_uuids(new_lines)) > 1:   # now several tasks': no single task's status (M2)
+        new_lines = put_keys(new_lines, {}, ['tw_status', 'tw_end'])
     if new_lines != lines:
         refuse_if_locked(path)
         write_note(path, new_lines, body)
     link_to(t['uuid'], path, stale_from)
+    mirror(path, t)                     # its fields follow at once, as on every status
     report(porcelain, t, path, False)
 
 
@@ -1004,6 +1054,7 @@ def cmd_status(args, porcelain):
     for a in note_annotations(t):
         p = annotation_target(a)
         if p and p.is_file():
+            adopt(p, t)                 # a note linked from the task's side only (djp 2026-11-04)
             mirror(p, t)
 
 
