@@ -2,6 +2,13 @@
 
 A collection of community plugins for [nb](https://xwmx.github.io/nb/) — the command-line note-taking, bookmarking, and archiving tool.
 
+## Install
+
+`tw -I nb-plugins` ([awesome-taskwarrior](https://github.com/linuxcaffe/awesome-taskwarrior))
+installs all four into nb. Each one can also be installed alone, with the `nb plugin install`
+line in its section below. [nbnotes](https://github.com/linuxcaffe/tw-nbnotes-hook) installs
+`tw.nb-plugin` itself.
+
 ---
 
 ## Plugins
