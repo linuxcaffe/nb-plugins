@@ -205,6 +205,10 @@ All activity is logged to `/tmp/nb-send.log` — useful for debugging file manag
 
 ## tw.nb-plugin
 
+> Task notes end to end (the hook that calls this plugin, syncing, opening a note from tw-web or a
+> phone): [Task notes](https://github.com/linuxcaffe/tw-mobilize/blob/main/docs/task-notes.md). [nbnotes](https://github.com/linuxcaffe/tw-nbnotes-hook) installs
+> this plugin and runs it whenever a task changes.
+
 > For Taskwarrior users who keep notes in nb — every task can have a note, and every note knows its task.
 
 ### What this does
